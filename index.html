@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+    <title>Paper.io 2 - Arena Conquest &amp; Multiplayer</title>
+    <meta name="description" content="An authentic, ad-free clone of Paper.io 2 featuring offline bots, real-time multiplayer with friends, customizable skins, smooth controls, and satisfying territory expansion." />
+    <meta property="og:title" content="Paper.io 2 - Arena Conquest &amp; Multiplayer" />
+    <meta property="og:description" content="An authentic, ad-free clone of Paper.io 2 featuring offline bots, real-time multiplayer with friends, customizable skins, smooth controls, and satisfying territory expansion." />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=PT+Sans+Caption:700&amp;subset=cyrillic" />
+    <link rel="stylesheet" href="/style3.css" />
+  </head>
+  <body class="overflow-hidden select-none bg-[#e7fff4]">
+    <div id="game"></div>
+    <script type="text/javascript">
+      window.ads = {
+        showAds: function() {},
+        hideAds: function() {}
+      };
+      window.ShowPreroll = function() {
+        if (window.paperio2api && typeof window.paperio2api.startGame === 'function') {
+          window.paperio2api.startGame();
+        }
+      };
+      window.StartGame = function() {
+        if (window.paperio2api && typeof window.paperio2api.startGame === 'function') {
+          window.paperio2api.startGame();
+        }
+      };
+      window.checktimeForAds = function() { return false; };
+      window.updateLastAdsTime = function() {};
+      window.ShowAbout = function() {};
+      window.HideAbout = function() {};
+      window.ShowDisplayAd = function() {};
+      window.HideAds = function() {};
+    </script>
+    <script type="text/javascript" src="/app2.js"></script>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+

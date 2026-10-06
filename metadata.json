@@ -1,0 +1,6 @@
+{
+  "name": "Paper.io 2 - Arena Conquest & Multiplayer",
+  "description": "An authentic, ad-free clone of Paper.io 2 featuring offline bots, real-time multiplayer with friends, customizable skins, smooth controls, and satisfying territory expansion.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
