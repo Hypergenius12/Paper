@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { Peer, type DataConnection } from 'peerjs';
 
 interface GameSettingsState {
   zenMode: boolean;
@@ -52,6 +53,8 @@ const DEFAULT_SETTINGS: GameSettingsState = {
   useRandomColor: false,
 };
 
+const CLOUD_BACKEND_WS = 'wss://ais-pre-zvr2b6kpmf3ddywcq6cpos-712604269730.us-west2.run.app/ws';
+
 export default function App() {
   const [isOpen, setIsOpen] = useState(false);
   const [isPartyOpen, setIsPartyOpen] = useState(false);
@@ -65,7 +68,13 @@ export default function App() {
   const [partyMembers, setPartyMembers] = useState<PartyMember[]>([]);
   const [isPartyJoined, setIsPartyJoined] = useState(false);
   const [isHost, setIsHost] = useState(false);
+  const [connectionType, setConnectionType] = useState<'p2p' | 'cloud' | 'none'>('none');
+  const [connectionStatus, setConnectionStatus] = useState<string>('Offline');
+
+  // Network refs
   const wsRef = useRef<WebSocket | null>(null);
+  const peerRef = useRef<Peer | null>(null);
+  const p2pConnectionsRef = useRef<DataConnection[]>([]);
 
   const [settings, setSettings] = useState<GameSettingsState>(() => {
     try {
@@ -93,9 +102,11 @@ export default function App() {
     const params = new URLSearchParams(window.location.search);
     const codeFromUrl = params.get('party');
     if (codeFromUrl) {
-      setJoinInput(codeFromUrl.toUpperCase());
+      const clean = codeFromUrl.toUpperCase().trim();
+      setJoinInput(clean);
       setPartyTab('join');
       setIsPartyOpen(true);
+      connectToParty(clean);
     }
   }, []);
 
@@ -216,61 +227,193 @@ export default function App() {
     }
   };
 
-  // Party connection
+  // Cleanup network connections
+  const cleanupConnections = () => {
+    if (wsRef.current) {
+      wsRef.current.close();
+      wsRef.current = null;
+    }
+    if (peerRef.current) {
+      peerRef.current.destroy();
+      peerRef.current = null;
+    }
+    p2pConnectionsRef.current = [];
+  };
+
+  // Determine WebSocket endpoint
+  const getWebSocketUrl = () => {
+    if (typeof window === 'undefined') return CLOUD_BACKEND_WS;
+    const isGitHub = window.location.hostname.endsWith('github.io');
+    if (isGitHub) {
+      // Connect to Cloud Run backend when deployed on GitHub Pages static host!
+      return CLOUD_BACKEND_WS;
+    }
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    return `${protocol}//${window.location.host}/ws`;
+  };
+
+  // Connect to Party via WebRTC P2P + WebSocket Cloud Relay Fallback
   const connectToParty = (code: string) => {
     const cleanCode = code.toUpperCase().trim();
     if (!cleanCode) return;
 
-    if (wsRef.current) {
-      wsRef.current.close();
-    }
+    cleanupConnections();
+    setConnectionStatus('Connecting...');
 
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
-    wsRef.current = ws;
-
-    ws.onopen = () => {
-      const nick = (document.getElementById('nick') as HTMLInputElement)?.value || 'Player';
-      ws.send(
-        JSON.stringify({
-          type: 'join_party',
-          partyCode: cleanCode,
-          name: nick,
-          color: settings.customColor,
-          partySettings: {
-            arenaSize: settings.arenaSize,
-            speedMultiplier: settings.speed,
-            botCount: settings.botCount,
-            infiniteArena: settings.infiniteArena,
-            zenMode: settings.zenMode,
-          },
-        })
-      );
+    const nick = (document.getElementById('nick') as HTMLInputElement)?.value || 'Player';
+    const myPlayer: PartyMember = {
+      id: `p-${Math.random().toString(36).substring(2, 7)}`,
+      name: nick,
+      color: settings.customColor,
+      isHost: partyTab === 'create',
     };
 
-    ws.onmessage = (event) => {
-      try {
-        const msg = JSON.parse(event.data);
-        if (msg.type === 'party_joined') {
-          setPartyCode(msg.partyCode);
-          setIsPartyJoined(true);
-          setIsHost(!!msg.isHost);
-        } else if (msg.type === 'party_members_updated') {
-          setPartyMembers(msg.members || []);
-          if (msg.settings) {
-            if (msg.settings.arenaSize) updateSetting('arenaSize', msg.settings.arenaSize);
-            if (msg.settings.speedMultiplier) updateSetting('speed', msg.settings.speedMultiplier);
-            if (msg.settings.botCount !== undefined) updateSetting('botCount', msg.settings.botCount);
-            if (msg.settings.infiniteArena !== undefined) updateSetting('infiniteArena', msg.settings.infiniteArena);
-            if (msg.settings.zenMode !== undefined) updateSetting('zenMode', msg.settings.zenMode);
+    // 1. Try WebSocket Cloud Relay
+    let wsSuccess = false;
+    try {
+      const targetUrl = getWebSocketUrl();
+      const ws = new WebSocket(targetUrl);
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        wsSuccess = true;
+        setConnectionType('cloud');
+        setConnectionStatus('Online (Cloud Relay)');
+        setIsPartyJoined(true);
+        setPartyCode(cleanCode);
+
+        ws.send(
+          JSON.stringify({
+            type: 'join_party',
+            partyCode: cleanCode,
+            name: nick,
+            color: settings.customColor,
+            partySettings: {
+              arenaSize: settings.arenaSize,
+              speedMultiplier: settings.speed,
+              botCount: settings.botCount,
+              infiniteArena: settings.infiniteArena,
+              zenMode: settings.zenMode,
+            },
+          })
+        );
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const msg = JSON.parse(event.data);
+          if (msg.type === 'party_joined') {
+            setPartyCode(msg.partyCode);
+            setIsPartyJoined(true);
+            setIsHost(!!msg.isHost);
+          } else if (msg.type === 'party_members_updated') {
+            setPartyMembers(msg.members || []);
+            if (msg.settings) {
+              if (msg.settings.arenaSize) updateSetting('arenaSize', msg.settings.arenaSize);
+              if (msg.settings.speedMultiplier) updateSetting('speed', msg.settings.speedMultiplier);
+              if (msg.settings.botCount !== undefined) updateSetting('botCount', msg.settings.botCount);
+              if (msg.settings.infiniteArena !== undefined) updateSetting('infiniteArena', msg.settings.infiniteArena);
+              if (msg.settings.zenMode !== undefined) updateSetting('zenMode', msg.settings.zenMode);
+            }
           }
-        }
-      } catch (e) {}
-    };
+        } catch (e) {}
+      };
 
-    ws.onerror = () => {
-      console.log('WS party connection notice');
-    };
+      ws.onerror = () => {
+        if (!wsSuccess) {
+          initPeerJSP2P(cleanCode, myPlayer);
+        }
+      };
+    } catch (e) {
+      initPeerJSP2P(cleanCode, myPlayer);
+    }
+  };
+
+  // 2. WebRTC PeerJS P2P (Serverless mesh for GitHub Pages)
+  const initPeerJSP2P = (code: string, me: PartyMember) => {
+    setConnectionStatus('Connecting P2P (WebRTC)...');
+    const peerId = partyTab === 'create' ? `paper2-room-${code}` : undefined;
+
+    try {
+      const peer = peerId ? new Peer(peerId, { debug: 1 }) : new Peer({ debug: 1 });
+      peerRef.current = peer;
+
+      peer.on('open', (id) => {
+        setConnectionType('p2p');
+        setConnectionStatus('Online (WebRTC P2P Direct)');
+        setIsPartyJoined(true);
+        setPartyCode(code);
+
+        if (partyTab === 'create') {
+          setIsHost(true);
+          setPartyMembers([{ ...me, isHost: true }]);
+
+          // Listen for incoming guest connections
+          peer.on('connection', (conn) => {
+            p2pConnectionsRef.current.push(conn);
+            conn.on('data', (data: any) => {
+              if (data && data.type === 'guest_join') {
+                const newMember: PartyMember = {
+                  id: conn.peer,
+                  name: data.name || 'Friend',
+                  color: data.color || '#ff9100',
+                  isHost: false,
+                };
+                setPartyMembers((prev) => {
+                  const updated = [...prev.filter((m) => m.id !== newMember.id), newMember];
+                  // Broadcast updated list to all guests
+                  p2pConnectionsRef.current.forEach((c) => {
+                    if (c.open) {
+                      c.send({
+                        type: 'members_update',
+                        members: updated,
+                        settings,
+                      });
+                    }
+                  });
+                  return updated;
+                });
+              }
+            });
+          });
+        } else {
+          // Guest connecting to host's peer
+          const hostPeerId = `paper2-room-${code}`;
+          const conn = peer.connect(hostPeerId);
+          p2pConnectionsRef.current.push(conn);
+
+          conn.on('open', () => {
+            conn.send({
+              type: 'guest_join',
+              name: me.name,
+              color: me.color,
+            });
+          });
+
+          conn.on('data', (data: any) => {
+            if (data && data.type === 'members_update') {
+              setPartyMembers(data.members || []);
+              if (data.settings) {
+                if (data.settings.arenaSize) updateSetting('arenaSize', data.settings.arenaSize);
+                if (data.settings.speedMultiplier) updateSetting('speed', data.settings.speedMultiplier);
+                if (data.settings.botCount !== undefined) updateSetting('botCount', data.settings.botCount);
+                if (data.settings.infiniteArena !== undefined) updateSetting('infiniteArena', data.settings.infiniteArena);
+                if (data.settings.zenMode !== undefined) updateSetting('zenMode', data.settings.zenMode);
+              }
+            } else if (data && data.type === 'start_match') {
+              handleStartPartyGame();
+            }
+          });
+        }
+      });
+
+      peer.on('error', (err) => {
+        console.log('PeerJS notice:', err);
+        setConnectionStatus('Local Arena Ready');
+      });
+    } catch (e) {
+      setConnectionStatus('Local Arena Ready');
+    }
   };
 
   const handleCreateParty = () => {
@@ -293,6 +436,14 @@ export default function App() {
   };
 
   const handleStartPartyGame = () => {
+    // If host on P2P, notify all guests to start
+    if (isHost && connectionType === 'p2p') {
+      p2pConnectionsRef.current.forEach((conn) => {
+        if (conn.open) {
+          conn.send({ type: 'start_match', settings });
+        }
+      });
+    }
     setIsPartyOpen(false);
     handleSaveAndPlay();
   };
@@ -365,9 +516,19 @@ export default function App() {
             <div className="flex items-center justify-between pb-2.5 border-b border-white/15">
               <div className="flex items-center gap-2">
                 <span className="text-xl">🎉</span>
-                <h2 className="text-lg sm:text-xl font-bold tracking-wide text-[#33cdcf]">
-                  ONLINE PARTY MULTIPLAYER
-                </h2>
+                <div>
+                  <h2 className="text-lg sm:text-xl font-bold tracking-wide text-[#33cdcf]">
+                    ONLINE PARTY MULTIPLAYER
+                  </h2>
+                  <div className="flex items-center gap-1.5 text-[11px] text-white/60">
+                    <span
+                      className={`w-2 h-2 rounded-full ${
+                        connectionType !== 'none' ? 'bg-emerald-400' : 'bg-amber-400'
+                      }`}
+                    />
+                    <span>{connectionStatus}</span>
+                  </div>
+                </div>
               </div>
               <button
                 type="button"
@@ -410,7 +571,7 @@ export default function App() {
                 {/* Party Code Card */}
                 <div className="bg-black/30 p-3 rounded-xl border border-white/10 flex flex-col sm:flex-row items-center justify-between gap-3">
                   <div>
-                    <span className="text-[11px] text-white/60 block">YOUR PARTY CODE:</span>
+                    <span className="text-[11px] text-white/60 block">SHARE THIS PARTY CODE:</span>
                     <span className="text-2xl font-mono font-black text-[#eaec4b] tracking-widest">
                       {partyCode || 'CREATING...'}
                     </span>
@@ -428,13 +589,13 @@ export default function App() {
                       }}
                       className="flex-1 sm:flex-none px-3 py-1.5 font-bold text-xs rounded-lg active:border-b-0 active:translate-y-0.5 cursor-pointer"
                     >
-                      {copied ? '✅ COPIED!' : '📋 COPY LINK'}
+                      {copied ? '✅ LINK COPIED!' : '📋 COPY LINK'}
                     </button>
                     <button
                       type="button"
                       onClick={handleCreateParty}
                       className="px-2.5 py-1.5 bg-black/40 hover:bg-black/60 rounded-lg text-xs font-bold border border-white/20 cursor-pointer"
-                      title="New Code"
+                      title="Generate New Code"
                     >
                       🎲 NEW
                     </button>
@@ -444,9 +605,9 @@ export default function App() {
                 {/* Party Members Roster */}
                 <div className="bg-black/30 p-2.5 rounded-xl border border-white/10">
                   <div className="flex items-center justify-between mb-1.5">
-                    <span className="font-bold text-white text-xs">👥 Players in Room:</span>
+                    <span className="font-bold text-white text-xs">👥 Connected Players:</span>
                     <span className="text-[11px] text-emerald-400 font-bold">
-                      {partyMembers.length || 1} Connected
+                      {partyMembers.length || 1} in Room
                     </span>
                   </div>
                   <div className="flex flex-wrap gap-1.5 max-h-24 overflow-y-auto">
@@ -477,7 +638,7 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Party Settings (Host configurable) */}
+                {/* Party Arena Rules */}
                 <div className="bg-black/30 p-2.5 rounded-xl border border-white/10 flex flex-col gap-2">
                   <span className="font-bold text-white text-xs">⚙️ Party Arena Rules</span>
 
@@ -575,7 +736,7 @@ export default function App() {
             {partyTab === 'join' && (
               <div className="flex flex-col gap-3 py-2">
                 <p className="text-white/70 text-xs">
-                  Enter the 4-letter Party Code provided by your friend:
+                  Enter the Party Code provided by your friend:
                 </p>
                 <div className="flex items-center gap-2">
                   <input
@@ -603,11 +764,14 @@ export default function App() {
                 </div>
                 {isPartyJoined && partyCode && (
                   <div className="p-3 bg-emerald-500/15 border border-emerald-500/30 rounded-xl text-emerald-300 text-xs flex items-center justify-between">
-                    <span>Connected to Party <strong>{partyCode}</strong>!</span>
+                    <div>
+                      <div>Connected to Party <strong>{partyCode}</strong>!</div>
+                      <div className="text-[10px] text-white/60 mt-0.5">{connectionStatus}</div>
+                    </div>
                     <button
                       type="button"
                       onClick={handleStartPartyGame}
-                      className="px-3 py-1 bg-emerald-500 text-black font-bold rounded-lg cursor-pointer"
+                      className="px-3.5 py-1.5 bg-emerald-500 text-black font-bold rounded-lg cursor-pointer"
                     >
                       ENTER GAME
                     </button>
