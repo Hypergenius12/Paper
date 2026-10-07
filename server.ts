@@ -65,7 +65,17 @@ interface Player {
   isHost?: boolean;
 }
 
+interface ChatMessage {
+  id: string;
+  sender: string;
+  color: string;
+  text: string;
+  timestamp: number;
+}
+
 interface PartySettings {
+  isPrivate: boolean;
+  password?: string;
   arenaSize: 'small' | 'normal' | 'massive';
   speedMultiplier: number;
   botCount: number;
@@ -90,12 +100,14 @@ interface PartyRoom {
   hostId: string;
   createdAt: number;
   arena: ServerArena;
+  chatMessages: ChatMessage[];
 }
 
 const partyRooms = new Map<string, PartyRoom>();
 
 function createDefaultSettings(): PartySettings {
   return {
+    isPrivate: false,
     arenaSize: 'normal',
     speedMultiplier: 1.0,
     botCount: 10,
@@ -254,6 +266,7 @@ function getOrCreatePartyRoom(code: string, settings?: Partial<PartySettings>): 
       hostId: '',
       createdAt: Date.now(),
       arena: createArena(fullSettings),
+      chatMessages: [],
     };
     partyRooms.set(normalized, room);
   }
@@ -338,6 +351,26 @@ setInterval(() => {
 }, 60000);
 
 // REST API for Party
+app.get('/api/party/public', (_req, res) => {
+  const list = [];
+  for (const [code, room] of partyRooms.entries()) {
+    if (code !== 'PUBLIC' && !room.arena.settings.isPrivate) {
+      const humanCount = Array.from(room.arena.players.values()).filter(p => !p.isBot).length;
+      list.push({
+        code,
+        memberCount: humanCount,
+        settings: {
+          arenaSize: room.arena.settings.arenaSize,
+          speedMultiplier: room.arena.settings.speedMultiplier,
+          botCount: room.arena.settings.botCount,
+          infiniteArena: room.arena.settings.infiniteArena,
+        },
+      });
+    }
+  }
+  res.json({ publicParties: list });
+});
+
 app.get('/api/party/:code', (req, res) => {
   const code = req.params.code.toUpperCase().trim();
   const room = partyRooms.get(code);
@@ -348,8 +381,15 @@ app.get('/api/party/:code', (req, res) => {
   res.json({
     exists: true,
     partyCode: room.code,
+    isPrivate: !!room.arena.settings.isPrivate,
     memberCount: humanCount,
-    settings: room.arena.settings,
+    settings: {
+      arenaSize: room.arena.settings.arenaSize,
+      speedMultiplier: room.arena.settings.speedMultiplier,
+      botCount: room.arena.settings.botCount,
+      infiniteArena: room.arena.settings.infiniteArena,
+      zenMode: room.arena.settings.zenMode,
+    },
   });
 });
 
@@ -381,6 +421,20 @@ wss.on('connection', (ws) => {
       // Join party (or default public match)
       if (msg.type === 'join_game' || msg.type === 'join_party') {
         const partyCode = (msg.partyCode || 'PUBLIC').toUpperCase().trim();
+        const existingRoom = partyRooms.get(partyCode);
+
+        // Check password if private room
+        if (existingRoom && existingRoom.arena.settings.isPrivate && existingRoom.arena.settings.password) {
+          // If not the very first creator
+          if (existingRoom.arena.clients.size > 0 && msg.password !== existingRoom.arena.settings.password) {
+            ws.send(JSON.stringify({
+              type: 'party_error',
+              message: 'Incorrect password for this private party!',
+            }));
+            return;
+          }
+        }
+
         boundPartyCode = partyCode;
         const room = getOrCreatePartyRoom(partyCode, msg.partySettings);
         const ar = room.arena;
@@ -432,6 +486,7 @@ wss.on('connection', (ws) => {
           isHost,
           settings: ar.settings,
           player: humanPlayer,
+          chatHistory: room.chatMessages.slice(-20),
         }));
 
         // Broadcast updated party members list
@@ -461,17 +516,67 @@ wss.on('connection', (ws) => {
         return;
       }
 
+      if (msg.type === 'start_party_match') {
+        const room = partyRooms.get(boundPartyCode);
+        if (room && room.hostId === boundPlayerId) {
+          broadcastToArena(room.arena, {
+            type: 'party_match_started',
+            partyCode: room.code,
+            settings: room.arena.settings,
+          });
+        }
+        return;
+      }
+
       if (msg.type === 'party_chat') {
         const room = partyRooms.get(boundPartyCode);
         if (room && boundPlayerId) {
           const sender = room.arena.players.get(boundPlayerId);
+          const chatMsg: ChatMessage = {
+            id: `msg-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+            sender: sender ? sender.name : 'Player',
+            color: sender ? sender.color : '#33cdcf',
+            text: String(msg.text || '').substring(0, 120),
+            timestamp: Date.now(),
+          };
+          room.chatMessages.push(chatMsg);
+          if (room.chatMessages.length > 50) room.chatMessages.shift();
+
           broadcastToArena(room.arena, {
             type: 'party_chat_message',
-            sender: sender ? sender.name : 'Player',
-            text: String(msg.text || '').substring(0, 100),
-            timestamp: Date.now(),
+            message: chatMsg,
           });
         }
+        return;
+      }
+
+      if (msg.type === 'leave_party') {
+        const room = partyRooms.get(boundPartyCode);
+        if (room && boundPlayerId) {
+          room.arena.players.delete(boundPlayerId);
+          room.arena.clients.delete(boundPlayerId);
+
+          if (room.hostId === boundPlayerId) {
+            const remaining = Array.from(room.arena.players.values()).filter(p => !p.isBot);
+            if (remaining.length > 0) {
+              room.hostId = remaining[0].id;
+              remaining[0].isHost = true;
+            }
+          }
+
+          const humanMembers = Array.from(room.arena.players.values())
+            .filter(p => !p.isBot)
+            .map(p => ({ id: p.id, name: p.name, color: p.color, isHost: p.isHost }));
+
+          broadcastToArena(room.arena, {
+            type: 'party_members_updated',
+            partyCode: room.code,
+            members: humanMembers,
+            settings: room.arena.settings,
+          });
+        }
+        boundPlayerId = null;
+        boundPartyCode = 'PUBLIC';
         return;
       }
 

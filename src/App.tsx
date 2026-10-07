@@ -24,6 +24,20 @@ interface PartyMember {
   isHost?: boolean;
 }
 
+interface ChatMessage {
+  id: string;
+  sender: string;
+  color: string;
+  text: string;
+  timestamp: number;
+}
+
+interface PublicPartyInfo {
+  code: string;
+  memberCount: number;
+  settings: any;
+}
+
 const PRESET_COLORS = [
   '#00e5ff', // Cyan
   '#ff1744', // Red
@@ -61,20 +75,32 @@ export default function App() {
   const [isPlaying, setIsPlaying] = useState(false);
 
   // Party state
-  const [partyTab, setPartyTab] = useState<'create' | 'join'>('create');
+  const [partyTab, setPartyTab] = useState<'create' | 'join' | 'public'>('create');
   const [partyCode, setPartyCode] = useState('');
   const [joinInput, setJoinInput] = useState('');
+  const [isPrivateLobby, setIsPrivateLobby] = useState(false);
+  const [partyPassword, setPartyPassword] = useState('');
+  const [joinPassword, setJoinPassword] = useState('');
   const [copied, setCopied] = useState(false);
   const [partyMembers, setPartyMembers] = useState<PartyMember[]>([]);
   const [isPartyJoined, setIsPartyJoined] = useState(false);
   const [isHost, setIsHost] = useState(false);
   const [connectionType, setConnectionType] = useState<'p2p' | 'cloud' | 'none'>('none');
   const [connectionStatus, setConnectionStatus] = useState<string>('Offline');
+  const [partyError, setPartyError] = useState<string>('');
+  const [publicParties, setPublicParties] = useState<PublicPartyInfo[]>([]);
+
+  // Chat state
+  const [chatOpen, setChatOpen] = useState(true);
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const [chatInput, setChatInput] = useState('');
+  const [unreadCount, setUnreadCount] = useState(0);
 
   // Network refs
   const wsRef = useRef<WebSocket | null>(null);
   const peerRef = useRef<Peer | null>(null);
   const p2pConnectionsRef = useRef<DataConnection[]>([]);
+  const chatBottomRef = useRef<HTMLDivElement | null>(null);
 
   const [settings, setSettings] = useState<GameSettingsState>(() => {
     try {
@@ -97,18 +123,46 @@ export default function App() {
     return DEFAULT_SETTINGS;
   });
 
-  // Check URL for party invite (?party=CODE)
+  // Check URL parameters on mount
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const codeFromUrl = params.get('party');
+    const passFromUrl = params.get('pass');
     if (codeFromUrl) {
       const clean = codeFromUrl.toUpperCase().trim();
       setJoinInput(clean);
+      if (passFromUrl) setJoinPassword(passFromUrl);
       setPartyTab('join');
       setIsPartyOpen(true);
-      connectToParty(clean);
+      connectToParty(clean, passFromUrl || '');
     }
   }, []);
+
+  // Fetch public parties periodically
+  useEffect(() => {
+    if (!isPartyOpen && !isPartyJoined) return;
+    const fetchPublic = async () => {
+      try {
+        const res = await fetch('/api/party/public');
+        if (res.ok) {
+          const data = await res.json();
+          if (Array.isArray(data.publicParties)) {
+            setPublicParties(data.publicParties);
+          }
+        }
+      } catch (e) {}
+    };
+    fetchPublic();
+    const interval = setInterval(fetchPublic, 5000);
+    return () => clearInterval(interval);
+  }, [isPartyOpen, isPartyJoined]);
+
+  // Scroll chat to bottom
+  useEffect(() => {
+    if (chatOpen && chatBottomRef.current) {
+      chatBottomRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [chatMessages, chatOpen]);
 
   // Sync settings with window.paperSettings and game engine API
   useEffect(() => {
@@ -227,6 +281,22 @@ export default function App() {
     }
   };
 
+  // Leave party
+  const handleLeaveParty = () => {
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'leave_party' }));
+    }
+    cleanupConnections();
+    setIsPartyJoined(false);
+    setIsHost(false);
+    setPartyCode('');
+    setPartyMembers([]);
+    setChatMessages([]);
+    setConnectionStatus('Offline');
+    setConnectionType('none');
+    setPartyError('');
+  };
+
   // Cleanup network connections
   const cleanupConnections = () => {
     if (wsRef.current) {
@@ -244,20 +314,18 @@ export default function App() {
   const getWebSocketUrl = () => {
     if (typeof window === 'undefined') return CLOUD_BACKEND_WS;
     const isGitHub = window.location.hostname.endsWith('github.io');
-    if (isGitHub) {
-      // Connect to Cloud Run backend when deployed on GitHub Pages static host!
-      return CLOUD_BACKEND_WS;
-    }
+    if (isGitHub) return CLOUD_BACKEND_WS;
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     return `${protocol}//${window.location.host}/ws`;
   };
 
-  // Connect to Party via WebRTC P2P + WebSocket Cloud Relay Fallback
-  const connectToParty = (code: string) => {
+  // Connect to Party
+  const connectToParty = (code: string, passwordAttempt?: string) => {
     const cleanCode = code.toUpperCase().trim();
     if (!cleanCode) return;
 
     cleanupConnections();
+    setPartyError('');
     setConnectionStatus('Connecting...');
 
     const nick = (document.getElementById('nick') as HTMLInputElement)?.value || 'Player';
@@ -268,7 +336,6 @@ export default function App() {
       isHost: partyTab === 'create',
     };
 
-    // 1. Try WebSocket Cloud Relay
     let wsSuccess = false;
     try {
       const targetUrl = getWebSocketUrl();
@@ -279,16 +346,17 @@ export default function App() {
         wsSuccess = true;
         setConnectionType('cloud');
         setConnectionStatus('Online (Cloud Relay)');
-        setIsPartyJoined(true);
-        setPartyCode(cleanCode);
 
         ws.send(
           JSON.stringify({
             type: 'join_party',
             partyCode: cleanCode,
+            password: passwordAttempt !== undefined ? passwordAttempt : (partyTab === 'create' ? partyPassword : joinPassword),
             name: nick,
             color: settings.customColor,
             partySettings: {
+              isPrivate: isPrivateLobby,
+              password: partyPassword,
               arenaSize: settings.arenaSize,
               speedMultiplier: settings.speed,
               botCount: settings.botCount,
@@ -302,10 +370,16 @@ export default function App() {
       ws.onmessage = (event) => {
         try {
           const msg = JSON.parse(event.data);
+          if (msg.type === 'party_error') {
+            setPartyError(msg.message || 'Error joining party');
+            setConnectionStatus('Failed');
+            return;
+          }
           if (msg.type === 'party_joined') {
             setPartyCode(msg.partyCode);
             setIsPartyJoined(true);
             setIsHost(!!msg.isHost);
+            if (msg.chatHistory) setChatMessages(msg.chatHistory);
           } else if (msg.type === 'party_members_updated') {
             setPartyMembers(msg.members || []);
             if (msg.settings) {
@@ -315,22 +389,29 @@ export default function App() {
               if (msg.settings.infiniteArena !== undefined) updateSetting('infiniteArena', msg.settings.infiniteArena);
               if (msg.settings.zenMode !== undefined) updateSetting('zenMode', msg.settings.zenMode);
             }
+          } else if (msg.type === 'party_chat_message') {
+            if (msg.message) {
+              setChatMessages((prev) => [...prev, msg.message]);
+              if (!chatOpen) setUnreadCount((c) => c + 1);
+            }
+          } else if (msg.type === 'party_match_started') {
+            handleSaveAndPlay();
           }
         } catch (e) {}
       };
 
       ws.onerror = () => {
         if (!wsSuccess) {
-          initPeerJSP2P(cleanCode, myPlayer);
+          initPeerJSP2P(cleanCode, myPlayer, passwordAttempt);
         }
       };
     } catch (e) {
-      initPeerJSP2P(cleanCode, myPlayer);
+      initPeerJSP2P(cleanCode, myPlayer, passwordAttempt);
     }
   };
 
-  // 2. WebRTC PeerJS P2P (Serverless mesh for GitHub Pages)
-  const initPeerJSP2P = (code: string, me: PartyMember) => {
+  // WebRTC PeerJS P2P (Serverless mesh for GitHub Pages)
+  const initPeerJSP2P = (code: string, me: PartyMember, passwordAttempt?: string) => {
     setConnectionStatus('Connecting P2P (WebRTC)...');
     const peerId = partyTab === 'create' ? `paper2-room-${code}` : undefined;
 
@@ -338,7 +419,7 @@ export default function App() {
       const peer = peerId ? new Peer(peerId, { debug: 1 }) : new Peer({ debug: 1 });
       peerRef.current = peer;
 
-      peer.on('open', (id) => {
+      peer.on('open', () => {
         setConnectionType('p2p');
         setConnectionStatus('Online (WebRTC P2P Direct)');
         setIsPartyJoined(true);
@@ -348,11 +429,15 @@ export default function App() {
           setIsHost(true);
           setPartyMembers([{ ...me, isHost: true }]);
 
-          // Listen for incoming guest connections
+          // Host handles incoming connections
           peer.on('connection', (conn) => {
             p2pConnectionsRef.current.push(conn);
             conn.on('data', (data: any) => {
               if (data && data.type === 'guest_join') {
+                if (isPrivateLobby && partyPassword && data.password !== partyPassword) {
+                  conn.send({ type: 'party_error', message: 'Incorrect party password!' });
+                  return;
+                }
                 const newMember: PartyMember = {
                   id: conn.peer,
                   name: data.name || 'Friend',
@@ -361,7 +446,6 @@ export default function App() {
                 };
                 setPartyMembers((prev) => {
                   const updated = [...prev.filter((m) => m.id !== newMember.id), newMember];
-                  // Broadcast updated list to all guests
                   p2pConnectionsRef.current.forEach((c) => {
                     if (c.open) {
                       c.send({
@@ -373,11 +457,17 @@ export default function App() {
                   });
                   return updated;
                 });
+              } else if (data && data.type === 'chat') {
+                const msg = data.message;
+                setChatMessages((prev) => [...prev, msg]);
+                p2pConnectionsRef.current.forEach((c) => {
+                  if (c.open) c.send({ type: 'chat', message: msg });
+                });
               }
             });
           });
         } else {
-          // Guest connecting to host's peer
+          // Guest connecting to host
           const hostPeerId = `paper2-room-${code}`;
           const conn = peer.connect(hostPeerId);
           p2pConnectionsRef.current.push(conn);
@@ -387,21 +477,21 @@ export default function App() {
               type: 'guest_join',
               name: me.name,
               color: me.color,
+              password: passwordAttempt || joinPassword,
             });
           });
 
           conn.on('data', (data: any) => {
-            if (data && data.type === 'members_update') {
+            if (data && data.type === 'party_error') {
+              setPartyError(data.message);
+              setConnectionStatus('Failed');
+            } else if (data && data.type === 'members_update') {
               setPartyMembers(data.members || []);
-              if (data.settings) {
-                if (data.settings.arenaSize) updateSetting('arenaSize', data.settings.arenaSize);
-                if (data.settings.speedMultiplier) updateSetting('speed', data.settings.speedMultiplier);
-                if (data.settings.botCount !== undefined) updateSetting('botCount', data.settings.botCount);
-                if (data.settings.infiniteArena !== undefined) updateSetting('infiniteArena', data.settings.infiniteArena);
-                if (data.settings.zenMode !== undefined) updateSetting('zenMode', data.settings.zenMode);
-              }
+            } else if (data && data.type === 'chat') {
+              setChatMessages((prev) => [...prev, data.message]);
+              if (!chatOpen) setUnreadCount((c) => c + 1);
             } else if (data && data.type === 'start_match') {
-              handleStartPartyGame();
+              handleSaveAndPlay();
             }
           });
         }
@@ -424,32 +514,203 @@ export default function App() {
 
   const handleJoinParty = () => {
     if (!joinInput.trim()) return;
-    connectToParty(joinInput.trim());
+    connectToParty(joinInput.trim(), joinPassword);
+  };
+
+  const handleSendChat = (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!chatInput.trim()) return;
+
+    const nick = (document.getElementById('nick') as HTMLInputElement)?.value || 'Player';
+    const newMsg: ChatMessage = {
+      id: `m-${Date.now()}`,
+      sender: nick,
+      color: settings.customColor,
+      text: chatInput.trim(),
+      timestamp: Date.now(),
+    };
+
+    setChatInput('');
+
+    if (connectionType === 'cloud' && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'party_chat', text: newMsg.text }));
+    } else if (connectionType === 'p2p') {
+      setChatMessages((prev) => [...prev, newMsg]);
+      p2pConnectionsRef.current.forEach((conn) => {
+        if (conn.open) conn.send({ type: 'chat', message: newMsg });
+      });
+    }
   };
 
   const handleCopyPartyLink = () => {
-    const url = `${window.location.origin}${window.location.pathname}?party=${partyCode}`;
+    let url = `${window.location.origin}${window.location.pathname}?party=${partyCode}`;
+    if (isPrivateLobby && partyPassword) {
+      url += `&pass=${encodeURIComponent(partyPassword)}`;
+    }
     navigator.clipboard.writeText(url).then(() => {
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     });
   };
 
-  const handleStartPartyGame = () => {
-    // If host on P2P, notify all guests to start
-    if (isHost && connectionType === 'p2p') {
+  // Host starts the match for all
+  const handleHostStartGame = () => {
+    if (!isHost) return;
+
+    if (connectionType === 'cloud' && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'start_party_match' }));
+    } else if (connectionType === 'p2p') {
       p2pConnectionsRef.current.forEach((conn) => {
-        if (conn.open) {
-          conn.send({ type: 'start_match', settings });
-        }
+        if (conn.open) conn.send({ type: 'start_match', settings });
       });
     }
+
     setIsPartyOpen(false);
     handleSaveAndPlay();
   };
 
   return (
     <div className="pointer-events-none fixed inset-0 z-40 select-none">
+      {/* Home Screen Active Party Dock & Chat (Only when on menu and in a party) */}
+      {!isPlaying && isPartyJoined && (
+        <div className="absolute top-4 left-4 pointer-events-auto flex flex-col gap-2 z-50">
+          {/* Party Lobby Bar */}
+          <div className="bg-[#24292e]/95 backdrop-blur-md border-2 border-[#33cdcf]/40 p-2.5 rounded-2xl shadow-2xl flex items-center gap-3 text-white text-xs">
+            <div className="flex items-center gap-1.5">
+              <span className="text-base">🎉</span>
+              <div>
+                <div className="font-bold text-[#33cdcf] font-mono tracking-wider flex items-center gap-1">
+                  ROOM: {partyCode}
+                  {isPrivateLobby && <span className="text-[10px] text-amber-400">🔒</span>}
+                </div>
+                <div className="text-[10px] text-white/60">
+                  {partyMembers.length} {partyMembers.length === 1 ? 'Player' : 'Players'}
+                </div>
+              </div>
+            </div>
+
+            {/* Players Pills */}
+            <div className="hidden sm:flex items-center gap-1 max-w-[200px] overflow-x-auto">
+              {partyMembers.map((m) => (
+                <div
+                  key={m.id}
+                  className="flex items-center gap-1 px-2 py-0.5 bg-black/40 rounded-full border border-white/10 text-[11px]"
+                  title={m.name}
+                >
+                  <span className="w-2 h-2 rounded-full" style={{ backgroundColor: m.color || '#33cdcf' }} />
+                  <span className="truncate max-w-[60px] font-bold">{m.name}</span>
+                  {m.isHost && <span className="text-[9px] text-amber-400">👑</span>}
+                </div>
+              ))}
+            </div>
+
+            {/* Host Start Button vs Guest Waiting Banner */}
+            {isHost ? (
+              <button
+                type="button"
+                onClick={handleHostStartGame}
+                style={{
+                  backgroundColor: '#7fed4c',
+                  borderColor: '#56a130',
+                  color: '#1e4612',
+                  borderBottomWidth: '3px',
+                  borderBottomStyle: 'solid',
+                }}
+                className="px-3.5 py-1.5 rounded-xl font-bold text-xs tracking-wider shadow-md active:translate-y-0.5 active:border-b-0 cursor-pointer hover:brightness-105 transition-all whitespace-nowrap"
+              >
+                ▶ START MATCH
+              </button>
+            ) : (
+              <div className="px-3 py-1 bg-amber-500/20 text-amber-300 font-bold text-[11px] rounded-xl border border-amber-500/30 flex items-center gap-1.5 whitespace-nowrap animate-pulse">
+                <span>⏳</span>
+                <span>WAITING FOR HOST...</span>
+              </div>
+            )}
+
+            {/* Leave Party */}
+            <button
+              type="button"
+              onClick={handleLeaveParty}
+              className="px-2.5 py-1.5 bg-red-500/20 hover:bg-red-500/40 text-red-300 rounded-xl border border-red-500/30 font-bold text-[11px] cursor-pointer"
+              title="Leave this Party"
+            >
+              🚪 LEAVE
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Home Screen Chat Window (Bottom-Left) */}
+      {!isPlaying && isPartyJoined && (
+        <div className="absolute bottom-4 left-4 pointer-events-auto z-50 flex flex-col items-start gap-1">
+          {/* Chat Toggle Button */}
+          <button
+            type="button"
+            onClick={() => {
+              setChatOpen(!chatOpen);
+              if (!chatOpen) setUnreadCount(0);
+            }}
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-[#24292e]/90 hover:bg-[#24292e] text-white rounded-xl border border-white/20 text-xs font-bold shadow-lg cursor-pointer transition-all"
+          >
+            <span>💬</span>
+            <span>PARTY CHAT</span>
+            {unreadCount > 0 && (
+              <span className="px-1.5 py-0.2 bg-red-500 text-white text-[10px] rounded-full font-bold">
+                {unreadCount}
+              </span>
+            )}
+            <span className="text-[10px] text-white/50">{chatOpen ? '▼' : '▲'}</span>
+          </button>
+
+          {/* Chat Box */}
+          {chatOpen && (
+            <div className="w-72 sm:w-80 h-52 bg-[#1f2327]/95 backdrop-blur-md rounded-2xl border-2 border-white/15 shadow-2xl flex flex-col overflow-hidden text-xs text-white">
+              <div className="p-2 border-b border-white/10 flex items-center justify-between bg-black/30">
+                <span className="font-bold text-[#33cdcf]">Party Messages ({partyCode})</span>
+                <span className="text-[10px] text-white/50">{connectionStatus}</span>
+              </div>
+
+              {/* Messages History */}
+              <div className="flex-1 p-2.5 overflow-y-auto flex flex-col gap-1.5 text-[11px]">
+                {chatMessages.length === 0 ? (
+                  <div className="text-white/40 italic text-center my-auto">
+                    No messages yet. Say hi to your party!
+                  </div>
+                ) : (
+                  chatMessages.map((m) => (
+                    <div key={m.id} className="leading-snug bg-black/20 p-1.5 rounded-lg border border-white/5">
+                      <span className="font-bold" style={{ color: m.color || '#33cdcf' }}>
+                        {m.sender}:{' '}
+                      </span>
+                      <span className="text-white/90">{m.text}</span>
+                    </div>
+                  ))
+                )}
+                <div ref={chatBottomRef} />
+              </div>
+
+              {/* Input Form */}
+              <form onSubmit={handleSendChat} className="p-1.5 border-t border-white/10 flex gap-1.5 bg-black/40">
+                <input
+                  type="text"
+                  maxLength={100}
+                  value={chatInput}
+                  onChange={(e) => setChatInput(e.target.value)}
+                  placeholder="Type a message..."
+                  className="flex-1 px-2.5 py-1.5 bg-black/50 text-white rounded-lg border border-white/15 focus:outline-none focus:border-[#33cdcf] text-xs"
+                />
+                <button
+                  type="submit"
+                  className="px-3 py-1.5 bg-[#33cdcf] hover:bg-[#2bbac1] text-[#063a3b] font-bold rounded-lg cursor-pointer"
+                >
+                  Send
+                </button>
+              </form>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Top Menu Buttons: Only shown on main menu when not playing */}
       {!isPlaying && (
         <div className="absolute top-4 right-4 pointer-events-auto flex items-center gap-2.5">
@@ -539,8 +800,22 @@ export default function App() {
               </button>
             </div>
 
+            {/* Error Message */}
+            {partyError && (
+              <div className="p-2.5 bg-red-500/20 border border-red-500/40 rounded-xl text-red-300 text-xs flex items-center justify-between">
+                <span>⚠️ {partyError}</span>
+                <button
+                  type="button"
+                  onClick={() => setPartyError('')}
+                  className="text-red-300 hover:text-white font-bold cursor-pointer"
+                >
+                  ✕
+                </button>
+              </div>
+            )}
+
             {/* Tabs */}
-            <div className="grid grid-cols-2 gap-2 bg-black/40 p-1 rounded-xl">
+            <div className="grid grid-cols-3 gap-1.5 bg-black/40 p-1 rounded-xl">
               <button
                 type="button"
                 onClick={() => setPartyTab('create')}
@@ -550,7 +825,7 @@ export default function App() {
                     : 'text-white/70 hover:text-white'
                 }`}
               >
-                CREATE PARTY
+                CREATE
               </button>
               <button
                 type="button"
@@ -561,7 +836,18 @@ export default function App() {
                     : 'text-white/70 hover:text-white'
                 }`}
               >
-                JOIN WITH CODE
+                JOIN CODE
+              </button>
+              <button
+                type="button"
+                onClick={() => setPartyTab('public')}
+                className={`py-1.5 rounded-lg font-bold text-xs cursor-pointer transition-all ${
+                  partyTab === 'public'
+                    ? 'bg-[#33cdcf] text-[#063a3b] shadow-md'
+                    : 'text-white/70 hover:text-white'
+                }`}
+              >
+                PUBLIC ({publicParties.length})
               </button>
             </div>
 
@@ -571,7 +857,7 @@ export default function App() {
                 {/* Party Code Card */}
                 <div className="bg-black/30 p-3 rounded-xl border border-white/10 flex flex-col sm:flex-row items-center justify-between gap-3">
                   <div>
-                    <span className="text-[11px] text-white/60 block">SHARE THIS PARTY CODE:</span>
+                    <span className="text-[11px] text-white/60 block">PARTY CODE:</span>
                     <span className="text-2xl font-mono font-black text-[#eaec4b] tracking-widest">
                       {partyCode || 'CREATING...'}
                     </span>
@@ -602,7 +888,54 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Party Members Roster */}
+                {/* Public vs Private Lobby Toggle */}
+                <div className="bg-black/30 p-2.5 rounded-xl border border-white/10 flex flex-col gap-2">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <span className="font-bold text-white text-xs">Lobby Privacy:</span>
+                      <p className="text-[10px] text-white/60">
+                        {isPrivateLobby ? 'Private: Requires password to join.' : 'Public: Anyone can browse and join.'}
+                      </p>
+                    </div>
+                    <div className="grid grid-cols-2 gap-1 bg-black/50 p-1 rounded-lg">
+                      <button
+                        type="button"
+                        onClick={() => setIsPrivateLobby(false)}
+                        className={`px-2.5 py-1 rounded text-xs font-bold cursor-pointer ${
+                          !isPrivateLobby ? 'bg-[#33cdcf] text-[#063a3b]' : 'text-white/60'
+                        }`}
+                      >
+                        🌐 Public
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setIsPrivateLobby(true)}
+                        className={`px-2.5 py-1 rounded text-xs font-bold cursor-pointer ${
+                          isPrivateLobby ? 'bg-amber-400 text-black' : 'text-white/60'
+                        }`}
+                      >
+                        🔒 Private
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Password Input (Only when Private) */}
+                  {isPrivateLobby && (
+                    <div className="flex items-center gap-2 pt-1 border-t border-white/10">
+                      <span className="text-[11px] text-white/70 whitespace-nowrap">Passcode / PIN:</span>
+                      <input
+                        type="text"
+                        maxLength={12}
+                        value={partyPassword}
+                        onChange={(e) => setPartyPassword(e.target.value)}
+                        placeholder="e.g. 1234"
+                        className="flex-1 py-1 px-2.5 bg-black/50 text-white font-mono text-xs font-bold rounded-lg border border-white/20 focus:outline-none focus:border-amber-400"
+                      />
+                    </div>
+                  )}
+                </div>
+
+                {/* Connected Players Roster */}
                 <div className="bg-black/30 p-2.5 rounded-xl border border-white/10">
                   <div className="flex items-center justify-between mb-1.5">
                     <span className="font-bold text-white text-xs">👥 Connected Players:</span>
@@ -714,38 +1047,57 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Start Party Button */}
-                <button
-                  type="button"
-                  onClick={handleStartPartyGame}
-                  style={{
-                    backgroundColor: '#7fed4c',
-                    borderColor: '#56a130',
-                    color: '#1e4612',
-                    borderBottomWidth: '4px',
-                    borderBottomStyle: 'solid',
-                  }}
-                  className="w-full py-2.5 rounded-xl font-bold text-base tracking-wider shadow-xl active:translate-y-0.5 active:border-b-0 cursor-pointer hover:brightness-105 transition-all text-center"
-                >
-                  START PARTY MATCH
-                </button>
+                {/* Host Start Button vs Leave */}
+                <div className="flex gap-2">
+                  {isPartyJoined && (
+                    <button
+                      type="button"
+                      onClick={handleLeaveParty}
+                      className="px-4 py-2.5 bg-red-500/20 hover:bg-red-500/40 text-red-300 rounded-xl border border-red-500/30 font-bold text-xs cursor-pointer"
+                    >
+                      LEAVE
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={handleHostStartGame}
+                    style={{
+                      backgroundColor: '#7fed4c',
+                      borderColor: '#56a130',
+                      color: '#1e4612',
+                      borderBottomWidth: '4px',
+                      borderBottomStyle: 'solid',
+                    }}
+                    className="flex-1 py-2.5 rounded-xl font-bold text-base tracking-wider shadow-xl active:translate-y-0.5 active:border-b-0 cursor-pointer hover:brightness-105 transition-all text-center"
+                  >
+                    START MATCH FOR ALL
+                  </button>
+                </div>
               </div>
             )}
 
-            {/* Tab 2: Join Party */}
+            {/* Tab 2: Join Code */}
             {partyTab === 'join' && (
               <div className="flex flex-col gap-3 py-2">
                 <p className="text-white/70 text-xs">
-                  Enter the Party Code provided by your friend:
+                  Enter the Party Code (and passcode if private):
                 </p>
-                <div className="flex items-center gap-2">
+                <div className="flex flex-col gap-2">
                   <input
                     type="text"
                     maxLength={8}
                     value={joinInput}
                     onChange={(e) => setJoinInput(e.target.value.toUpperCase())}
-                    placeholder="ENTER CODE (e.g. 7K9Q)"
-                    className="flex-1 py-2.5 px-3 bg-black/40 text-white font-mono text-base font-bold rounded-xl border border-white/20 uppercase tracking-widest focus:outline-none focus:border-[#33cdcf]"
+                    placeholder="ENTER PARTY CODE (e.g. 7K9Q)"
+                    className="w-full py-2.5 px-3 bg-black/40 text-white font-mono text-base font-bold rounded-xl border border-white/20 uppercase tracking-widest focus:outline-none focus:border-[#33cdcf]"
+                  />
+                  <input
+                    type="text"
+                    maxLength={12}
+                    value={joinPassword}
+                    onChange={(e) => setJoinPassword(e.target.value)}
+                    placeholder="PASSCODE (Optional, for private lobbies)"
+                    className="w-full py-2 px-3 bg-black/40 text-white font-mono text-xs font-bold rounded-xl border border-white/20 focus:outline-none focus:border-[#33cdcf]"
                   />
                   <button
                     type="button"
@@ -757,25 +1109,71 @@ export default function App() {
                       borderBottomWidth: '4px',
                       borderBottomStyle: 'solid',
                     }}
-                    className="px-5 py-2.5 rounded-xl font-bold text-sm tracking-wider shadow-lg active:translate-y-0.5 active:border-b-0 cursor-pointer hover:brightness-105 transition-all"
+                    className="w-full py-2.5 rounded-xl font-bold text-sm tracking-wider shadow-lg active:translate-y-0.5 active:border-b-0 cursor-pointer hover:brightness-105 transition-all text-center"
                   >
-                    JOIN
+                    JOIN ROOM
                   </button>
                 </div>
+
                 {isPartyJoined && partyCode && (
-                  <div className="p-3 bg-emerald-500/15 border border-emerald-500/30 rounded-xl text-emerald-300 text-xs flex items-center justify-between">
-                    <div>
-                      <div>Connected to Party <strong>{partyCode}</strong>!</div>
-                      <div className="text-[10px] text-white/60 mt-0.5">{connectionStatus}</div>
+                  <div className="p-3 bg-emerald-500/15 border border-emerald-500/30 rounded-xl text-emerald-300 text-xs flex flex-col gap-2">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <div>Connected to Party <strong>{partyCode}</strong>!</div>
+                        <div className="text-[10px] text-white/60 mt-0.5">{connectionStatus}</div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={handleLeaveParty}
+                        className="px-2.5 py-1 bg-red-500/20 text-red-300 font-bold rounded-lg border border-red-500/30 cursor-pointer text-xs"
+                      >
+                        LEAVE
+                      </button>
                     </div>
-                    <button
-                      type="button"
-                      onClick={handleStartPartyGame}
-                      className="px-3.5 py-1.5 bg-emerald-500 text-black font-bold rounded-lg cursor-pointer"
-                    >
-                      ENTER GAME
-                    </button>
+
+                    {/* Guest waiting banner */}
+                    {!isHost && (
+                      <div className="p-2 bg-amber-500/20 text-amber-300 rounded-lg border border-amber-500/30 font-bold text-center text-xs animate-pulse">
+                        ⏳ Waiting for the Host to start the match...
+                      </div>
+                    )}
                   </div>
+                )}
+              </div>
+            )}
+
+            {/* Tab 3: Public Lobbies List */}
+            {partyTab === 'public' && (
+              <div className="flex flex-col gap-2.5 py-1 max-h-72 overflow-y-auto">
+                <span className="font-bold text-white text-xs">🌐 Open Public Lobbies:</span>
+                {publicParties.length === 0 ? (
+                  <div className="text-white/50 text-center py-6 italic text-xs">
+                    No open public parties right now. Create one in the "CREATE" tab!
+                  </div>
+                ) : (
+                  publicParties.map((p) => (
+                    <div
+                      key={p.code}
+                      className="bg-black/30 p-2.5 rounded-xl border border-white/10 flex items-center justify-between text-xs"
+                    >
+                      <div>
+                        <div className="font-bold font-mono text-[#33cdcf]">ROOM: {p.code}</div>
+                        <div className="text-[10px] text-white/60">
+                          {p.memberCount} Players • {p.settings?.arenaSize || 'normal'} arena • {p.settings?.speedMultiplier || 1}x speed
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setJoinInput(p.code);
+                          connectToParty(p.code);
+                        }}
+                        className="px-3 py-1.5 bg-[#33cdcf] hover:bg-[#2bbac1] text-[#063a3b] font-bold rounded-lg cursor-pointer"
+                      >
+                        JOIN
+                      </button>
+                    </div>
+                  ))
                 )}
               </div>
             )}
