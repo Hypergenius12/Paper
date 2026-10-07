@@ -215,7 +215,9 @@ input {
     flex: 1 1 auto;
 }
 
-button {
+#ui button,
+.uibox button,
+.skinbox button {
     border: none;
     border-bottom: 6px solid;
     font-size: 35px;
@@ -225,56 +227,75 @@ button {
     cursor: pointer;
 }
 
-button:active {
+#ui button:active,
+.uibox button:active,
+.skinbox button:active {
     border-bottom: none;
     border-top: 6px solid;
 }
 
-button:focus {
+#ui button:focus,
+.uibox button:focus,
+.skinbox button:focus {
     outline: none;
 }
 
-button.yellow {
+#ui button.yellow,
+.uibox button.yellow,
+.skinbox button.yellow {
     background: #eaec4b;
     border-color: #a1a130;
     color: #888a34;
 }
 
-button.green {
+#ui button.green,
+.uibox button.green,
+.skinbox button.green {
     background: #7fed4c;
     border-color: #56a130;
     color: #56a130;
 }
 
-button.orange {
+#ui button.orange,
+.uibox button.orange,
+.skinbox button.orange {
     background: #ff972f;
     border-color: #ae4e0d;
     color: #422100;
 }
 
-button.disabled {
+#ui button.disabled,
+.uibox button.disabled,
+.skinbox button.disabled {
     background: #ebebeb;
     border-bottom: 6px solid #9c9c9c;
     color: #9c9c9c;
     cursor: default;
 }
 
-button.yellow:hover,
-button.yellow:focus {
+#ui button.yellow:hover,
+#ui button.yellow:focus,
+.uibox button.yellow:hover,
+.uibox button.yellow:focus {
     background: #fafc5b;
 }
 
-button.green:hover,
-button.green:focus {
+#ui button.green:hover,
+#ui button.green:focus,
+.uibox button.green:hover,
+.uibox button.green:focus {
     background: #8efc5b;
 }
 
-button.disabled:hover,
-button.disabled:focus {
+#ui button.disabled:hover,
+#ui button.disabled:focus,
+.uibox button.disabled:hover,
+.uibox button.disabled:focus {
     background: #ebebeb;
 }
 
-button.disabled:active {
+#ui button.disabled:active,
+.uibox button.disabled:active {
     border-top: none;
     border-bottom: 6px solid;
 }

@@ -20,21 +20,81 @@
         hideAds: function() {}
       };
       window.ShowPreroll = function() {
-        if (window.paperio2api && typeof window.paperio2api.startGame === 'function') {
-          window.paperio2api.startGame();
-        }
+        window.StartGame();
       };
       window.StartGame = function() {
+        try {
+          window.dispatchEvent(new CustomEvent('paperio_game_start'));
+        } catch (e) {}
         if (window.paperio2api && typeof window.paperio2api.startGame === 'function') {
           window.paperio2api.startGame();
         }
       };
+      window.ga = function() {};
+      window.gtag = function() {};
       window.checktimeForAds = function() { return false; };
       window.updateLastAdsTime = function() {};
       window.ShowAbout = function() {};
       window.HideAbout = function() {};
       window.ShowDisplayAd = function() {};
       window.HideAds = function() {};
+
+      // Persistent Settings Manager
+      try {
+        var savedSettings = localStorage.getItem('paperio_settings');
+        window.paperSettings = savedSettings ? JSON.parse(savedSettings) : {
+          zenMode: false,
+          invincible: false,
+          speed: 1.0,
+          botCount: 15,
+          botDifficulty: 'normal',
+          customColor: '#00d2ff',
+          useRandomColor: false
+        };
+      } catch(e) {
+        window.paperSettings = {
+          zenMode: false,
+          invincible: false,
+          speed: 1.0,
+          botCount: 15,
+          botDifficulty: 'normal',
+          customColor: '#00d2ff',
+          useRandomColor: false
+        };
+      }
+
+      function hexToRgb(hex) {
+        var c = (hex || '#00d2ff').replace('#', '');
+        if (c.length === 3) c = c.split('').map(function(x) { return x + x; }).join('');
+        var num = parseInt(c, 16) || 0;
+        return { r: (num >> 16) & 255, g: (num >> 8) & 255, b: num & 255 };
+      }
+
+      function darken(hex, factor) {
+        var rgb = hexToRgb(hex);
+        var f = factor || 0.35;
+        var dr = Math.floor(rgb.r * (1 - f));
+        var dg = Math.floor(rgb.g * (1 - f));
+        var db = Math.floor(rgb.b * (1 - f));
+        return '#' + ((1 << 24) + (dr << 16) + (dg << 8) + db).toString(16).slice(1);
+      }
+
+      window.getNoSkinColor = function() {
+        var s = window.paperSettings;
+        if (!s) return null;
+        var hex = s.customColor || '#00d2ff';
+        if (s.useRandomColor) {
+          var palette = ['#00e5ff', '#ff1744', '#00e676', '#ff9100', '#d500f9', '#ffea00', '#76ff03', '#f50057', '#2979ff'];
+          hex = palette[Math.floor(Math.random() * palette.length)];
+        }
+        return {
+          main: hex,
+          back: darken(hex, 0.4),
+          nick: darken(hex, 0.4),
+          plate: hex,
+          particles: [hex, darken(hex, 0.2)]
+        };
+      };
     </script>
     <script type="text/javascript" src="/app2.js"></script>
     <div id="root"></div>

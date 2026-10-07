@@ -623,7 +623,7 @@ wss.on('connection', (ws) => {
 // Setup static files and Vite middleware
 async function startServer() {
   const isProd = process.env.NODE_ENV === 'production';
-  const port = 3000;
+  const port = Number(process.env.PORT) || 3000;
 
   // Serve static public assets
   app.use(express.static(path.resolve(__dirname, 'public')));
