@@ -62,9 +62,15 @@ interface Player {
   isBot: boolean;
   kills: number;
   percent: number;
-  botState?: 'expanding' | 'returning';
-  botTimer?: number;
-  botTurnDir?: number;
+  isHost?: boolean;
+}
+
+interface PartySettings {
+  arenaSize: 'small' | 'normal' | 'massive';
+  speedMultiplier: number;
+  botCount: number;
+  infiniteArena: boolean;
+  zenMode: boolean;
 }
 
 interface ServerArena {
@@ -76,21 +82,47 @@ interface ServerArena {
   idxPlayerMap: Map<number, string>;
   nextPlayerIdx: number;
   lastTick: number;
+  settings: PartySettings;
 }
 
-const arena: ServerArena = {
-  players: new Map(),
-  clients: new Map(),
-  gridCells: new Int16Array(GRID_SIZE * GRID_SIZE),
-  totalValidCells: 0,
-  playerIdxMap: new Map(),
-  idxPlayerMap: new Map(),
-  nextPlayerIdx: 1,
-  lastTick: Date.now(),
-};
+interface PartyRoom {
+  code: string;
+  hostId: string;
+  createdAt: number;
+  arena: ServerArena;
+}
 
-function initGrid() {
-  arena.totalValidCells = 0;
+const partyRooms = new Map<string, PartyRoom>();
+
+function createDefaultSettings(): PartySettings {
+  return {
+    arenaSize: 'normal',
+    speedMultiplier: 1.0,
+    botCount: 10,
+    infiniteArena: false,
+    zenMode: false,
+  };
+}
+
+function createArena(settings: PartySettings = createDefaultSettings()): ServerArena {
+  const newArena: ServerArena = {
+    players: new Map(),
+    clients: new Map(),
+    gridCells: new Int16Array(GRID_SIZE * GRID_SIZE),
+    totalValidCells: 0,
+    playerIdxMap: new Map(),
+    idxPlayerMap: new Map(),
+    nextPlayerIdx: 1,
+    lastTick: Date.now(),
+    settings,
+  };
+  initGrid(newArena);
+  ensureBotBalance(newArena);
+  return newArena;
+}
+
+function initGrid(ar: ServerArena) {
+  ar.totalValidCells = 0;
   const center = GRID_SIZE / 2;
   const radiusCells = (WORLD_RADIUS / CELL_SIZE) - 1;
 
@@ -99,11 +131,11 @@ function initGrid() {
       const dx = gx + 0.5 - center;
       const dy = gy + 0.5 - center;
       const i = gy * GRID_SIZE + gx;
-      if (dx * dx + dy * dy <= radiusCells * radiusCells) {
-        arena.gridCells[i] = 0;
-        arena.totalValidCells++;
+      if (ar.settings.infiniteArena || dx * dx + dy * dy <= radiusCells * radiusCells) {
+        ar.gridCells[i] = 0;
+        ar.totalValidCells++;
       } else {
-        arena.gridCells[i] = -1;
+        ar.gridCells[i] = -1;
       }
     }
   }
@@ -115,19 +147,12 @@ function worldToGrid(x: number, y: number): { gx: number; gy: number } {
   return { gx, gy };
 }
 
-function gridToWorld(gx: number, gy: number): { x: number; y: number } {
-  return {
-    x: (gx + 0.5) * CELL_SIZE - WORLD_RADIUS,
-    y: (gy + 0.5) * CELL_SIZE - WORLD_RADIUS,
-  };
-}
-
-function spawnBase(playerId: string, cx: number, cy: number, radiusWorld: number = 75) {
-  let pIdx = arena.playerIdxMap.get(playerId);
+function spawnBase(ar: ServerArena, playerId: string, cx: number, cy: number, radiusWorld: number = 75) {
+  let pIdx = ar.playerIdxMap.get(playerId);
   if (!pIdx) {
-    pIdx = arena.nextPlayerIdx++;
-    arena.playerIdxMap.set(playerId, pIdx);
-    arena.idxPlayerMap.set(pIdx, playerId);
+    pIdx = ar.nextPlayerIdx++;
+    ar.playerIdxMap.set(playerId, pIdx);
+    ar.idxPlayerMap.set(pIdx, playerId);
   }
 
   const { gx: cgx, gy: cgy } = worldToGrid(cx, cy);
@@ -140,8 +165,8 @@ function spawnBase(playerId: string, cx: number, cy: number, radiusWorld: number
         const gy = cgy + dy;
         if (gx >= 0 && gx < GRID_SIZE && gy >= 0 && gy < GRID_SIZE) {
           const idx = gy * GRID_SIZE + gx;
-          if (arena.gridCells[idx] >= 0) {
-            arena.gridCells[idx] = pIdx;
+          if (ar.gridCells[idx] >= 0) {
+            ar.gridCells[idx] = pIdx;
           }
         }
       }
@@ -149,24 +174,16 @@ function spawnBase(playerId: string, cx: number, cy: number, radiusWorld: number
   }
 }
 
-function broadcast(data: object) {
+function broadcastToArena(ar: ServerArena, data: object) {
   const json = JSON.stringify(data);
-  for (const ws of arena.clients.values()) {
+  for (const ws of ar.clients.values()) {
     if (ws.readyState === WebSocket.OPEN) {
       ws.send(json);
     }
   }
 }
 
-function sendTo(playerId: string, data: object) {
-  const ws = arena.clients.get(playerId);
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify(data));
-  }
-}
-
-// Spawns or respawns a bot to maintain capacity
-function spawnBotSlot(): Player {
+function spawnBotSlot(ar: ServerArena): Player {
   const botId = `bot-${Math.random().toString(36).substring(2, 7)}`;
   const botName = BOT_NAMES[Math.floor(Math.random() * BOT_NAMES.length)];
   const angle = Math.random() * Math.PI * 2;
@@ -179,291 +196,111 @@ function spawnBotSlot(): Player {
   const bot: Player = {
     id: botId,
     name: botName,
-    skinId: 'ladybug',
+    skinId: 'duck',
     color: colorPair.primary,
     secondaryColor: colorPair.secondary,
     x,
     y,
-    angle: Math.random() * Math.PI * 2,
-    targetAngle: Math.random() * Math.PI * 2,
-    speed: 155,
+    angle,
+    targetAngle: angle,
+    speed: 155 * ar.settings.speedMultiplier,
     trail: [],
     isAlive: true,
     isBot: true,
     kills: 0,
     percent: 0,
-    botState: 'expanding',
-    botTimer: 0,
-    botTurnDir: Math.random() > 0.5 ? 1 : -1,
   };
 
-  arena.players.set(botId, bot);
-  spawnBase(botId, x, y);
+  ar.players.set(botId, bot);
+  spawnBase(ar, botId, x, y);
   return bot;
 }
 
-// Ensures arena capacity is filled with bots when real players are fewer than ARENA_CAPACITY
-function ensureBotBalance() {
-  const currentTotal = arena.players.size;
-  if (currentTotal < ARENA_CAPACITY) {
-    for (let i = currentTotal; i < ARENA_CAPACITY; i++) {
-      spawnBotSlot();
-    }
-  }
-}
-
-function eliminatePlayer(victim: Player, killer?: Player, reason?: string) {
-  victim.isAlive = false;
-  victim.trail = [];
-
-  const pIdx = arena.playerIdxMap.get(victim.id);
-  if (pIdx) {
-    for (let i = 0; i < arena.gridCells.length; i++) {
-      if (arena.gridCells[i] === pIdx) {
-        arena.gridCells[i] = 0;
-      }
-    }
+function ensureBotBalance(ar: ServerArena) {
+  const targetBots = ar.settings.botCount;
+  let botCount = 0;
+  for (const p of ar.players.values()) {
+    if (p.isBot) botCount++;
   }
 
-  broadcast({
-    type: 'player_eliminated',
-    victimId: victim.id,
-    victimName: victim.name,
-    killerId: killer?.id,
-    killerName: killer?.name,
-    reason,
-  });
-
-  // If a bot died, respawn after 3.5 seconds unless real players take the slot
-  if (victim.isBot) {
-    setTimeout(() => {
-      arena.players.delete(victim.id);
-      ensureBotBalance();
-    }, 3500);
-  }
-}
-
-function completeCapture(player: Player) {
-  const pIdx = arena.playerIdxMap.get(player.id) || 1;
-  const polygon = [...player.trail, { x: player.x, y: player.y }];
-
-  let minX = polygon[0].x, maxX = polygon[0].x, minY = polygon[0].y, maxY = polygon[0].y;
-  for (const pt of polygon) {
-    if (pt.x < minX) minX = pt.x;
-    if (pt.x > maxX) maxX = pt.x;
-    if (pt.y < minY) minY = pt.y;
-    if (pt.y > maxY) maxY = pt.y;
+  while (botCount < targetBots) {
+    spawnBotSlot(ar);
+    botCount++;
   }
 
-  const minGrid = worldToGrid(minX - CELL_SIZE, minY - CELL_SIZE);
-  const maxGrid = worldToGrid(maxX + CELL_SIZE, maxY + CELL_SIZE);
-
-  for (let gy = Math.max(0, minGrid.gy); gy <= Math.min(GRID_SIZE - 1, maxGrid.gy); gy++) {
-    for (let gx = Math.max(0, minGrid.gx); gx <= Math.min(GRID_SIZE - 1, maxGrid.gx); gx++) {
-      const idx = gy * GRID_SIZE + gx;
-      if (arena.gridCells[idx] >= 0) {
-        const wpt = gridToWorld(gx, gy);
-        if (isInsidePoly(wpt.x, wpt.y, polygon)) {
-          arena.gridCells[idx] = pIdx;
-        }
-      }
-    }
-  }
-
-  player.trail = [];
-  broadcast({
-    type: 'polygon_captured',
-    playerId: player.id,
-    polygon,
-  });
-}
-
-function isInsidePoly(px: number, py: number, poly: { x: number; y: number }[]): boolean {
-  let inside = false;
-  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
-    const xi = poly[i].x, yi = poly[i].y;
-    const xj = poly[j].x, yj = poly[j].y;
-    const intersect = ((yi > py) !== (yj > py)) && (px < ((xj - xi) * (py - yi)) / (yj - yi + 1e-9) + xi);
-    if (intersect) inside = !inside;
-  }
-  return inside;
-}
-
-function distToSeg(p: { x: number; y: number }, a: { x: number; y: number }, b: { x: number; y: number }): number {
-  const dx = b.x - a.x;
-  const dy = b.y - a.y;
-  const lenSq = dx * dx + dy * dy;
-  if (lenSq === 0) return Math.hypot(p.x - a.x, p.y - a.y);
-  let t = ((p.x - a.x) * dx + (p.y - a.y) * dy) / lenSq;
-  t = Math.max(0, Math.min(1, t));
-  return Math.hypot(p.x - (a.x + t * dx), p.y - (a.y + t * dy));
-}
-
-function findClosestBase(playerId: string, fx: number, fy: number): { x: number; y: number } | null {
-  const pIdx = arena.playerIdxMap.get(playerId);
-  if (!pIdx) return null;
-  const { gx: sgx, gy: sgy } = worldToGrid(fx, fy);
-  for (let r = 1; r <= 30; r++) {
-    for (let dy = -r; dy <= r; dy++) {
-      for (let dx = -r; dx <= r; dx++) {
-        if (Math.abs(dx) !== r && Math.abs(dy) !== r) continue;
-        const gx = sgx + dx;
-        const gy = sgy + dy;
-        if (gx >= 0 && gx < GRID_SIZE && gy >= 0 && gy < GRID_SIZE) {
-          if (arena.gridCells[gy * GRID_SIZE + gx] === pIdx) {
-            return gridToWorld(gx, gy);
+  if (botCount > targetBots) {
+    for (const [id, p] of ar.players.entries()) {
+      if (p.isBot && botCount > targetBots) {
+        const pIdx = ar.playerIdxMap.get(id);
+        if (pIdx) {
+          for (let i = 0; i < ar.gridCells.length; i++) {
+            if (ar.gridCells[i] === pIdx) ar.gridCells[i] = 0;
           }
         }
+        ar.players.delete(id);
+        botCount--;
       }
     }
   }
-  return null;
 }
 
-// 30 TPS Arena Tick Loop
-function arenaTick() {
+function getOrCreatePartyRoom(code: string, settings?: Partial<PartySettings>): PartyRoom {
+  const normalized = (code || 'PUBLIC').toUpperCase().trim();
+  let room = partyRooms.get(normalized);
+  if (!room) {
+    const fullSettings = { ...createDefaultSettings(), ...settings };
+    room = {
+      code: normalized,
+      hostId: '',
+      createdAt: Date.now(),
+      arena: createArena(fullSettings),
+    };
+    partyRooms.set(normalized, room);
+  }
+  return room;
+}
+
+// Global PUBLIC Arena for standard play
+const publicRoom = getOrCreatePartyRoom('PUBLIC');
+
+function tickArena(ar: ServerArena) {
   const now = Date.now();
-  const dt = Math.min((now - arena.lastTick) / 1000, 0.1);
-  arena.lastTick = now;
+  const dt = Math.min(0.1, (now - ar.lastTick) / 1000);
+  ar.lastTick = now;
 
-  const playerList = Array.from(arena.players.values());
-
-  for (const player of playerList) {
+  for (const player of ar.players.values()) {
     if (!player.isAlive) continue;
 
-    // Bot AI update
-    if (player.isBot) {
-      player.botTimer = (player.botTimer || 0) + dt;
-      const distCenter = Math.hypot(player.x, player.y);
-
-      if (distCenter > WORLD_RADIUS - 80) {
-        player.targetAngle = Math.atan2(-player.y, -player.x);
-      } else {
-        const trailLen = player.trail.length * 6;
-        if (player.trail.length === 0) {
-          player.botState = 'expanding';
-          if ((player.botTimer || 0) > 2) {
-            player.botTurnDir = Math.random() > 0.5 ? 1 : -1;
-            player.botTimer = 0;
-          }
-        } else if (trailLen > 240) {
-          player.botState = 'returning';
-        }
-
-        if (player.botState === 'returning') {
-          const home = findClosestBase(player.id, player.x, player.y);
-          if (home) {
-            player.targetAngle = Math.atan2(home.y - player.y, home.x - player.x);
-          } else {
-            player.targetAngle = player.angle + (player.botTurnDir || 1) * 2 * dt;
-          }
-        } else {
-          // Arc loop
-          player.targetAngle = player.angle + (player.botTurnDir || 1) * 0.9 * dt;
-        }
-      }
-    }
-
-    // Smooth turn towards targetAngle
-    let diff = (player.targetAngle - player.angle) % (Math.PI * 2);
-    if (diff > Math.PI) diff -= Math.PI * 2;
-    if (diff < -Math.PI) diff += Math.PI * 2;
+    // Turn steering
+    let diff = player.targetAngle - player.angle;
+    while (diff > Math.PI) diff -= Math.PI * 2;
+    while (diff < -Math.PI) diff += Math.PI * 2;
     const maxTurn = 6.0 * dt;
-    if (Math.abs(diff) <= maxTurn) {
-      player.angle = player.targetAngle;
-    } else {
-      player.angle += Math.sign(diff) * maxTurn;
-    }
+    player.angle += Math.max(-maxTurn, Math.min(maxTurn, diff));
 
     // Move forward
-    const vx = Math.cos(player.angle) * player.speed;
-    const vy = Math.sin(player.angle) * player.speed;
-    let nextX = player.x + vx * dt;
-    let nextY = player.y + vy * dt;
+    const speed = 155 * ar.settings.speedMultiplier;
+    player.x += Math.cos(player.angle) * speed * dt;
+    player.y += Math.sin(player.angle) * speed * dt;
 
-    // Arena boundary clamp
-    const distCenter = Math.hypot(nextX, nextY);
-    const maxDist = WORLD_RADIUS - 16;
-    if (distCenter > maxDist) {
-      const bAngle = Math.atan2(nextY, nextX);
-      nextX = Math.cos(bAngle) * maxDist;
-      nextY = Math.sin(bAngle) * maxDist;
-    }
-
-    player.x = nextX;
-    player.y = nextY;
-
-    // Territory check
-    const { gx, gy } = worldToGrid(player.x, player.y);
-    const cellIdx = gy * GRID_SIZE + gx;
-    const currentOwnerIdx = (gx >= 0 && gx < GRID_SIZE && gy >= 0 && gy < GRID_SIZE) ? arena.gridCells[cellIdx] : -1;
-    const playerIdx = arena.playerIdxMap.get(player.id) || -1;
-
-    const isInsideOwn = currentOwnerIdx === playerIdx;
-
-    if (isInsideOwn) {
-      if (player.trail.length > 2) {
-        completeCapture(player);
-      }
+    // Infinite Arena Looping
+    if (ar.settings.infiniteArena) {
+      if (player.x < -WORLD_RADIUS) player.x += WORLD_RADIUS * 2;
+      else if (player.x > WORLD_RADIUS) player.x -= WORLD_RADIUS * 2;
+      if (player.y < -WORLD_RADIUS) player.y += WORLD_RADIUS * 2;
+      else if (player.y > WORLD_RADIUS) player.y -= WORLD_RADIUS * 2;
     } else {
-      const lastPt = player.trail[player.trail.length - 1];
-      if (!lastPt || Math.hypot(player.x - lastPt.x, player.y - lastPt.y) >= 8) {
-        player.trail.push({ x: player.x, y: player.y });
+      // Clamp or kill on boundary
+      const dist = Math.hypot(player.x, player.y);
+      if (dist > WORLD_RADIUS - 15) {
+        player.isAlive = false;
       }
     }
   }
 
-  // Trail slice collisions
-  for (const killer of playerList) {
-    if (!killer.isAlive) continue;
-
-    for (const victim of playerList) {
-      if (!victim.isAlive || victim.trail.length < 2) continue;
-
-      if (victim.id === killer.id) {
-        if (killer.trail.length > 10) {
-          for (let i = 0; i < killer.trail.length - 8; i++) {
-            const p1 = killer.trail[i];
-            const p2 = killer.trail[i + 1];
-            if (distToSeg({ x: killer.x, y: killer.y }, p1, p2) < 18) {
-              eliminatePlayer(killer, undefined, 'Bit own trail');
-              break;
-            }
-          }
-        }
-      } else {
-        for (let i = 0; i < victim.trail.length - 1; i++) {
-          const p1 = victim.trail[i];
-          const p2 = victim.trail[i + 1];
-          if (distToSeg({ x: killer.x, y: killer.y }, p1, p2) < 18) {
-            killer.kills++;
-            eliminatePlayer(victim, killer, `Eliminated by ${killer.name}`);
-            break;
-          }
-        }
-      }
-    }
-  }
-
-  // Calculate percentages
-  const counts = new Map<number, number>();
-  for (let i = 0; i < arena.gridCells.length; i++) {
-    const val = arena.gridCells[i];
-    if (val > 0) {
-      counts.set(val, (counts.get(val) || 0) + 1);
-    }
-  }
-
-  for (const player of playerList) {
-    const pIdx = arena.playerIdxMap.get(player.id);
-    if (pIdx) {
-      const c = counts.get(pIdx) || 0;
-      player.percent = Math.round(((c / Math.max(1, arena.totalValidCells)) * 100) * 10) / 10;
-    }
-  }
-
-  // Broadcast state snapshot to all connected clients
-  broadcast({
+  // Broadcast state
+  const playerList = Array.from(ar.players.values());
+  broadcastToArena(ar, {
     type: 'state_snapshot',
     players: playerList.map(p => ({
       id: p.id,
@@ -483,14 +320,54 @@ function arenaTick() {
   });
 }
 
-// Initialize Arena
-initGrid();
-ensureBotBalance();
-setInterval(arenaTick, 1000 / 30);
+// Tick loop across all rooms
+setInterval(() => {
+  for (const room of partyRooms.values()) {
+    tickArena(room.arena);
+  }
+}, 1000 / 30);
+
+// Clean empty custom rooms
+setInterval(() => {
+  const now = Date.now();
+  for (const [code, room] of partyRooms.entries()) {
+    if (code !== 'PUBLIC' && room.arena.clients.size === 0 && now - room.createdAt > 300000) {
+      partyRooms.delete(code);
+    }
+  }
+}, 60000);
+
+// REST API for Party
+app.get('/api/party/:code', (req, res) => {
+  const code = req.params.code.toUpperCase().trim();
+  const room = partyRooms.get(code);
+  if (!room) {
+    return res.json({ exists: false });
+  }
+  const humanCount = Array.from(room.arena.players.values()).filter(p => !p.isBot).length;
+  res.json({
+    exists: true,
+    partyCode: room.code,
+    memberCount: humanCount,
+    settings: room.arena.settings,
+  });
+});
+
+app.post('/api/party/create', (req, res) => {
+  const custom = req.body.partyCode ? req.body.partyCode.toUpperCase().trim() : '';
+  const code = custom || Math.random().toString(36).substring(2, 6).toUpperCase();
+  const room = getOrCreatePartyRoom(code, req.body.settings);
+  res.json({
+    success: true,
+    partyCode: room.code,
+    settings: room.arena.settings,
+  });
+});
 
 // WebSocket Handler
 wss.on('connection', (ws) => {
   let boundPlayerId: string | null = null;
+  let boundPartyCode: string = 'PUBLIC';
 
   ws.on('message', (raw) => {
     try {
@@ -501,32 +378,22 @@ wss.on('connection', (ws) => {
         return;
       }
 
-      // Real person joins the game: REPLACES A BOT!
-      if (msg.type === 'join_game') {
+      // Join party (or default public match)
+      if (msg.type === 'join_game' || msg.type === 'join_party') {
+        const partyCode = (msg.partyCode || 'PUBLIC').toUpperCase().trim();
+        boundPartyCode = partyCode;
+        const room = getOrCreatePartyRoom(partyCode, msg.partySettings);
+        const ar = room.arena;
+
         const playerId = `player-${Math.random().toString(36).substring(2, 8)}`;
         boundPlayerId = playerId;
-        arena.clients.set(playerId, ws);
+        ar.clients.set(playerId, ws);
 
-        // Find a bot to replace
-        let replacedBotId: string | null = null;
-        for (const [id, p] of arena.players.entries()) {
-          if (p.isBot) {
-            replacedBotId = id;
-            break;
-          }
+        if (!room.hostId) {
+          room.hostId = playerId;
         }
 
-        if (replacedBotId) {
-          // Remove the bot from the arena to make room for the human
-          const bot = arena.players.get(replacedBotId)!;
-          const pIdx = arena.playerIdxMap.get(bot.id);
-          if (pIdx) {
-            for (let i = 0; i < arena.gridCells.length; i++) {
-              if (arena.gridCells[i] === pIdx) arena.gridCells[i] = 0;
-            }
-          }
-          arena.players.delete(replacedBotId);
-        }
+        const isHost = room.hostId === playerId;
 
         // Spawn human player
         const angle = Math.random() * Math.PI * 2;
@@ -546,50 +413,74 @@ wss.on('connection', (ws) => {
           y,
           angle: angle + Math.PI,
           targetAngle: angle + Math.PI,
-          speed: 155,
+          speed: 155 * ar.settings.speedMultiplier,
           trail: [],
           isAlive: true,
           isBot: false,
           kills: 0,
           percent: 0,
+          isHost,
         };
 
-        arena.players.set(playerId, humanPlayer);
-        spawnBase(playerId, x, y);
+        ar.players.set(playerId, humanPlayer);
+        spawnBase(ar, playerId, x, y);
 
         ws.send(JSON.stringify({
-          type: 'joined_game',
+          type: 'party_joined',
+          partyCode: room.code,
           playerId,
+          isHost,
+          settings: ar.settings,
           player: humanPlayer,
         }));
+
+        // Broadcast updated party members list
+        const humanMembers = Array.from(ar.players.values())
+          .filter(p => !p.isBot)
+          .map(p => ({ id: p.id, name: p.name, color: p.color, isHost: p.isHost }));
+
+        broadcastToArena(ar, {
+          type: 'party_members_updated',
+          partyCode: room.code,
+          members: humanMembers,
+          settings: ar.settings,
+        });
         return;
       }
 
-      if (msg.type === 'player_input') {
-        if (boundPlayerId) {
-          const player = arena.players.get(boundPlayerId);
-          if (player && typeof msg.angle === 'number') {
-            player.targetAngle = msg.angle;
-          }
+      if (msg.type === 'update_party_settings') {
+        const room = partyRooms.get(boundPartyCode);
+        if (room && msg.settings) {
+          room.arena.settings = { ...room.arena.settings, ...msg.settings };
+          ensureBotBalance(room.arena);
+          broadcastToArena(room.arena, {
+            type: 'party_settings_updated',
+            settings: room.arena.settings,
+          });
         }
         return;
       }
 
-      if (msg.type === 'respawn') {
-        if (boundPlayerId) {
-          const player = arena.players.get(boundPlayerId);
-          if (player) {
-            const angle = Math.random() * Math.PI * 2;
-            const dist = 300 + Math.random() * 400;
-            player.x = Math.cos(angle) * dist;
-            player.y = Math.sin(angle) * dist;
-            player.angle = angle + Math.PI;
-            player.targetAngle = angle + Math.PI;
-            player.trail = [];
-            player.isAlive = true;
-            player.kills = 0;
-            player.percent = 0;
-            spawnBase(player.id, player.x, player.y);
+      if (msg.type === 'party_chat') {
+        const room = partyRooms.get(boundPartyCode);
+        if (room && boundPlayerId) {
+          const sender = room.arena.players.get(boundPlayerId);
+          broadcastToArena(room.arena, {
+            type: 'party_chat_message',
+            sender: sender ? sender.name : 'Player',
+            text: String(msg.text || '').substring(0, 100),
+            timestamp: Date.now(),
+          });
+        }
+        return;
+      }
+
+      if (msg.type === 'player_input') {
+        const room = partyRooms.get(boundPartyCode);
+        if (room && boundPlayerId) {
+          const player = room.arena.players.get(boundPlayerId);
+          if (player && typeof msg.angle === 'number') {
+            player.targetAngle = msg.angle;
           }
         }
         return;
@@ -601,21 +492,30 @@ wss.on('connection', (ws) => {
 
   ws.on('close', () => {
     if (boundPlayerId) {
-      const player = arena.players.get(boundPlayerId);
-      if (player) {
-        // Clear human's territory
-        const pIdx = arena.playerIdxMap.get(player.id);
-        if (pIdx) {
-          for (let i = 0; i < arena.gridCells.length; i++) {
-            if (arena.gridCells[i] === pIdx) arena.gridCells[i] = 0;
+      const room = partyRooms.get(boundPartyCode);
+      if (room) {
+        room.arena.players.delete(boundPlayerId);
+        room.arena.clients.delete(boundPlayerId);
+
+        if (room.hostId === boundPlayerId) {
+          const remainingHumans = Array.from(room.arena.players.values()).filter(p => !p.isBot);
+          if (remainingHumans.length > 0) {
+            room.hostId = remainingHumans[0].id;
+            remainingHumans[0].isHost = true;
           }
         }
-        arena.players.delete(boundPlayerId);
-      }
-      arena.clients.delete(boundPlayerId);
 
-      // A bot immediately fills the vacant slot!
-      ensureBotBalance();
+        const humanMembers = Array.from(room.arena.players.values())
+          .filter(p => !p.isBot)
+          .map(p => ({ id: p.id, name: p.name, color: p.color, isHost: p.isHost }));
+
+        broadcastToArena(room.arena, {
+          type: 'party_members_updated',
+          partyCode: room.code,
+          members: humanMembers,
+          settings: room.arena.settings,
+        });
+      }
     }
   });
 });

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 
 interface GameSettingsState {
   zenMode: boolean;
@@ -10,8 +10,17 @@ interface GameSettingsState {
   theme: 'classic' | 'dark' | 'cyber';
   zoom: 'close' | 'normal' | 'far';
   baseSize: 'standard' | 'large';
+  arenaSize: 'small' | 'normal' | 'massive';
+  infiniteArena: boolean;
   customColor: string;
   useRandomColor: boolean;
+}
+
+interface PartyMember {
+  id: string;
+  name: string;
+  color: string;
+  isHost?: boolean;
 }
 
 const PRESET_COLORS = [
@@ -37,13 +46,26 @@ const DEFAULT_SETTINGS: GameSettingsState = {
   theme: 'classic',
   zoom: 'normal',
   baseSize: 'standard',
+  arenaSize: 'normal',
+  infiniteArena: false,
   customColor: '#00e5ff',
   useRandomColor: false,
 };
 
 export default function App() {
   const [isOpen, setIsOpen] = useState(false);
+  const [isPartyOpen, setIsPartyOpen] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
+
+  // Party state
+  const [partyTab, setPartyTab] = useState<'create' | 'join'>('create');
+  const [partyCode, setPartyCode] = useState('');
+  const [joinInput, setJoinInput] = useState('');
+  const [copied, setCopied] = useState(false);
+  const [partyMembers, setPartyMembers] = useState<PartyMember[]>([]);
+  const [isPartyJoined, setIsPartyJoined] = useState(false);
+  const [isHost, setIsHost] = useState(false);
+  const wsRef = useRef<WebSocket | null>(null);
 
   const [settings, setSettings] = useState<GameSettingsState>(() => {
     try {
@@ -54,10 +76,8 @@ export default function App() {
           ...DEFAULT_SETTINGS,
           ...parsed,
           speed: [1.0, 1.5, 2.0, 5.0].includes(parsed.speed) ? parsed.speed : 1.0,
-          trailWidth: typeof parsed.trailWidth === 'number' ? parsed.trailWidth : 8,
-          theme: parsed.theme || 'classic',
-          zoom: parsed.zoom || 'normal',
-          baseSize: parsed.baseSize || 'standard',
+          arenaSize: parsed.arenaSize || 'normal',
+          infiniteArena: !!parsed.infiniteArena,
           customColor:
             typeof parsed.customColor === 'string' && parsed.customColor
               ? parsed.customColor
@@ -67,6 +87,17 @@ export default function App() {
     } catch {}
     return DEFAULT_SETTINGS;
   });
+
+  // Check URL for party invite (?party=CODE)
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const codeFromUrl = params.get('party');
+    if (codeFromUrl) {
+      setJoinInput(codeFromUrl.toUpperCase());
+      setPartyTab('join');
+      setIsPartyOpen(true);
+    }
+  }, []);
 
   // Sync settings with window.paperSettings and game engine API
   useEffect(() => {
@@ -132,6 +163,7 @@ export default function App() {
   useEffect(() => {
     const handleGameStart = () => {
       setIsOpen(false);
+      setIsPartyOpen(false);
       setIsPlaying(true);
     };
 
@@ -174,11 +206,130 @@ export default function App() {
     }
   };
 
+  const handleRestartGame = () => {
+    setIsOpen(false);
+    setIsPlaying(true);
+    if (typeof (window as any).RestartGame === 'function') {
+      (window as any).RestartGame();
+    } else if (typeof (window as any).StartGame === 'function') {
+      (window as any).StartGame();
+    }
+  };
+
+  // Party connection
+  const connectToParty = (code: string) => {
+    const cleanCode = code.toUpperCase().trim();
+    if (!cleanCode) return;
+
+    if (wsRef.current) {
+      wsRef.current.close();
+    }
+
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
+    wsRef.current = ws;
+
+    ws.onopen = () => {
+      const nick = (document.getElementById('nick') as HTMLInputElement)?.value || 'Player';
+      ws.send(
+        JSON.stringify({
+          type: 'join_party',
+          partyCode: cleanCode,
+          name: nick,
+          color: settings.customColor,
+          partySettings: {
+            arenaSize: settings.arenaSize,
+            speedMultiplier: settings.speed,
+            botCount: settings.botCount,
+            infiniteArena: settings.infiniteArena,
+            zenMode: settings.zenMode,
+          },
+        })
+      );
+    };
+
+    ws.onmessage = (event) => {
+      try {
+        const msg = JSON.parse(event.data);
+        if (msg.type === 'party_joined') {
+          setPartyCode(msg.partyCode);
+          setIsPartyJoined(true);
+          setIsHost(!!msg.isHost);
+        } else if (msg.type === 'party_members_updated') {
+          setPartyMembers(msg.members || []);
+          if (msg.settings) {
+            if (msg.settings.arenaSize) updateSetting('arenaSize', msg.settings.arenaSize);
+            if (msg.settings.speedMultiplier) updateSetting('speed', msg.settings.speedMultiplier);
+            if (msg.settings.botCount !== undefined) updateSetting('botCount', msg.settings.botCount);
+            if (msg.settings.infiniteArena !== undefined) updateSetting('infiniteArena', msg.settings.infiniteArena);
+            if (msg.settings.zenMode !== undefined) updateSetting('zenMode', msg.settings.zenMode);
+          }
+        }
+      } catch (e) {}
+    };
+
+    ws.onerror = () => {
+      console.log('WS party connection notice');
+    };
+  };
+
+  const handleCreateParty = () => {
+    const randomCode = Math.random().toString(36).substring(2, 6).toUpperCase();
+    setPartyCode(randomCode);
+    connectToParty(randomCode);
+  };
+
+  const handleJoinParty = () => {
+    if (!joinInput.trim()) return;
+    connectToParty(joinInput.trim());
+  };
+
+  const handleCopyPartyLink = () => {
+    const url = `${window.location.origin}${window.location.pathname}?party=${partyCode}`;
+    navigator.clipboard.writeText(url).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  };
+
+  const handleStartPartyGame = () => {
+    setIsPartyOpen(false);
+    handleSaveAndPlay();
+  };
+
   return (
     <div className="pointer-events-none fixed inset-0 z-40 select-none">
-      {/* Settings Button: Only shown on main menu when not playing */}
+      {/* Top Menu Buttons: Only shown on main menu when not playing */}
       {!isPlaying && (
-        <div className="absolute top-4 right-4 pointer-events-auto">
+        <div className="absolute top-4 right-4 pointer-events-auto flex items-center gap-2.5">
+          {/* Party Button */}
+          <button
+            type="button"
+            onClick={() => {
+              setIsPartyOpen(true);
+              if (!partyCode && !isPartyJoined) {
+                handleCreateParty();
+              }
+            }}
+            style={{
+              fontFamily: "'PT Sans Caption', sans-serif",
+              backgroundColor: '#33cdcf',
+              borderColor: '#218c8f',
+              color: '#063a3b',
+              borderBottomWidth: '4px',
+              borderBottomStyle: 'solid',
+            }}
+            className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-sm font-bold tracking-wide shadow-lg hover:brightness-105 active:translate-y-0.5 active:border-b-0 cursor-pointer transition-all"
+            title="Create or Join Party"
+          >
+            <span className="text-base leading-none">🎉</span>
+            <span>PARTY</span>
+            {isPartyJoined && (
+              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse ml-0.5" />
+            )}
+          </button>
+
+          {/* Settings Button */}
           <button
             type="button"
             onClick={() => setIsOpen(true)}
@@ -190,7 +341,7 @@ export default function App() {
               borderBottomWidth: '4px',
               borderBottomStyle: 'solid',
             }}
-            className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-sm font-bold tracking-wide shadow-lg hover:brightness-105 active:translate-y-0.5 active:border-b-0 cursor-pointer transition-all"
+            className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-sm font-bold tracking-wide shadow-lg hover:brightness-105 active:translate-y-0.5 active:border-b-0 cursor-pointer transition-all"
             title="Open Game Settings"
           >
             <span className="text-base leading-none">⚙</span>
@@ -199,7 +350,276 @@ export default function App() {
         </div>
       )}
 
-      {/* Settings Modal */}
+      {/* Party Modal */}
+      {isPartyOpen && (
+        <div className="pointer-events-auto fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/75 backdrop-blur-xs animate-in fade-in duration-150">
+          <div
+            style={{
+              fontFamily: "'PT Sans Caption', system-ui, sans-serif",
+              backgroundColor: '#24292e',
+              borderColor: '#181c20',
+            }}
+            className="w-full max-w-lg max-h-[90vh] overflow-y-auto text-white rounded-2xl border-4 shadow-2xl p-4 sm:p-5 flex flex-col gap-3.5 text-xs sm:text-sm"
+          >
+            {/* Header */}
+            <div className="flex items-center justify-between pb-2.5 border-b border-white/15">
+              <div className="flex items-center gap-2">
+                <span className="text-xl">🎉</span>
+                <h2 className="text-lg sm:text-xl font-bold tracking-wide text-[#33cdcf]">
+                  ONLINE PARTY MULTIPLAYER
+                </h2>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsPartyOpen(false)}
+                className="w-8 h-8 flex items-center justify-center rounded-lg bg-black/40 hover:bg-black/60 text-white/80 hover:text-white font-bold cursor-pointer text-base"
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* Tabs */}
+            <div className="grid grid-cols-2 gap-2 bg-black/40 p-1 rounded-xl">
+              <button
+                type="button"
+                onClick={() => setPartyTab('create')}
+                className={`py-1.5 rounded-lg font-bold text-xs cursor-pointer transition-all ${
+                  partyTab === 'create'
+                    ? 'bg-[#33cdcf] text-[#063a3b] shadow-md'
+                    : 'text-white/70 hover:text-white'
+                }`}
+              >
+                CREATE PARTY
+              </button>
+              <button
+                type="button"
+                onClick={() => setPartyTab('join')}
+                className={`py-1.5 rounded-lg font-bold text-xs cursor-pointer transition-all ${
+                  partyTab === 'join'
+                    ? 'bg-[#33cdcf] text-[#063a3b] shadow-md'
+                    : 'text-white/70 hover:text-white'
+                }`}
+              >
+                JOIN WITH CODE
+              </button>
+            </div>
+
+            {/* Tab 1: Create Party */}
+            {partyTab === 'create' && (
+              <div className="flex flex-col gap-3">
+                {/* Party Code Card */}
+                <div className="bg-black/30 p-3 rounded-xl border border-white/10 flex flex-col sm:flex-row items-center justify-between gap-3">
+                  <div>
+                    <span className="text-[11px] text-white/60 block">YOUR PARTY CODE:</span>
+                    <span className="text-2xl font-mono font-black text-[#eaec4b] tracking-widest">
+                      {partyCode || 'CREATING...'}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2 w-full sm:w-auto">
+                    <button
+                      type="button"
+                      onClick={handleCopyPartyLink}
+                      style={{
+                        backgroundColor: '#eaec4b',
+                        borderColor: '#a1a130',
+                        color: '#686a24',
+                        borderBottomWidth: '3px',
+                        borderBottomStyle: 'solid',
+                      }}
+                      className="flex-1 sm:flex-none px-3 py-1.5 font-bold text-xs rounded-lg active:border-b-0 active:translate-y-0.5 cursor-pointer"
+                    >
+                      {copied ? '✅ COPIED!' : '📋 COPY LINK'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleCreateParty}
+                      className="px-2.5 py-1.5 bg-black/40 hover:bg-black/60 rounded-lg text-xs font-bold border border-white/20 cursor-pointer"
+                      title="New Code"
+                    >
+                      🎲 NEW
+                    </button>
+                  </div>
+                </div>
+
+                {/* Party Members Roster */}
+                <div className="bg-black/30 p-2.5 rounded-xl border border-white/10">
+                  <div className="flex items-center justify-between mb-1.5">
+                    <span className="font-bold text-white text-xs">👥 Players in Room:</span>
+                    <span className="text-[11px] text-emerald-400 font-bold">
+                      {partyMembers.length || 1} Connected
+                    </span>
+                  </div>
+                  <div className="flex flex-wrap gap-1.5 max-h-24 overflow-y-auto">
+                    {partyMembers.length > 0 ? (
+                      partyMembers.map((m) => (
+                        <div
+                          key={m.id}
+                          className="flex items-center gap-1.5 px-2.5 py-1 bg-black/40 rounded-lg border border-white/15 text-xs"
+                        >
+                          <span
+                            className="w-2.5 h-2.5 rounded-full"
+                            style={{ backgroundColor: m.color || '#33cdcf' }}
+                          />
+                          <span className="font-bold">{m.name}</span>
+                          {m.isHost && (
+                            <span className="text-[9px] bg-amber-500/20 text-amber-300 px-1 py-0.2 rounded border border-amber-500/30">
+                              HOST
+                            </span>
+                          )}
+                        </div>
+                      ))
+                    ) : (
+                      <div className="flex items-center gap-1.5 px-2.5 py-1 bg-black/40 rounded-lg border border-white/15 text-xs">
+                        <span className="w-2.5 h-2.5 rounded-full bg-[#00e5ff]" />
+                        <span className="font-bold">You (Host)</span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* Party Settings (Host configurable) */}
+                <div className="bg-black/30 p-2.5 rounded-xl border border-white/10 flex flex-col gap-2">
+                  <span className="font-bold text-white text-xs">⚙️ Party Arena Rules</span>
+
+                  {/* Arena Size */}
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] text-white/70">Arena Size:</span>
+                    <div className="grid grid-cols-3 gap-1">
+                      {[
+                        { id: 'small' as const, label: 'Small' },
+                        { id: 'normal' as const, label: 'Normal' },
+                        { id: 'massive' as const, label: 'Massive' },
+                      ].map((s) => (
+                        <button
+                          key={s.id}
+                          type="button"
+                          onClick={() => updateSetting('arenaSize', s.id)}
+                          style={{
+                            backgroundColor: settings.arenaSize === s.id ? '#33cdcf' : 'rgba(0,0,0,0.4)',
+                            borderColor: settings.arenaSize === s.id ? '#218c8f' : '#111',
+                            color: settings.arenaSize === s.id ? '#063a3b' : '#aaa',
+                            borderBottomWidth: '2px',
+                            borderBottomStyle: 'solid',
+                          }}
+                          className="px-2 py-0.5 text-[11px] font-bold rounded cursor-pointer"
+                        >
+                          {s.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Speed */}
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] text-white/70">Party Speed:</span>
+                    <div className="grid grid-cols-4 gap-1">
+                      {[1.0, 1.5, 2.0, 5.0].map((sp) => (
+                        <button
+                          key={sp}
+                          type="button"
+                          onClick={() => updateSetting('speed', sp)}
+                          style={{
+                            backgroundColor: settings.speed === sp ? '#ff972f' : 'rgba(0,0,0,0.4)',
+                            borderColor: settings.speed === sp ? '#ae4e0d' : '#111',
+                            color: settings.speed === sp ? '#422100' : '#aaa',
+                            borderBottomWidth: '2px',
+                            borderBottomStyle: 'solid',
+                          }}
+                          className="px-2 py-0.5 text-[11px] font-bold rounded cursor-pointer"
+                        >
+                          {sp}x
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Infinite Arena Looping */}
+                  <div className="flex items-center justify-between pt-1 border-t border-white/10">
+                    <span className="text-[11px] text-white/70">🌀 Infinite Arena (Looping Map):</span>
+                    <button
+                      type="button"
+                      onClick={() => updateSetting('infiniteArena', !settings.infiniteArena)}
+                      style={{
+                        backgroundColor: settings.infiniteArena ? '#7fed4c' : 'rgba(0,0,0,0.4)',
+                        borderColor: settings.infiniteArena ? '#56a130' : '#111',
+                        color: settings.infiniteArena ? '#1e4612' : '#aaa',
+                        borderBottomWidth: '2px',
+                        borderBottomStyle: 'solid',
+                      }}
+                      className="px-2.5 py-0.5 text-[11px] font-bold rounded cursor-pointer"
+                    >
+                      {settings.infiniteArena ? 'ON (NO BORDERS)' : 'OFF'}
+                    </button>
+                  </div>
+                </div>
+
+                {/* Start Party Button */}
+                <button
+                  type="button"
+                  onClick={handleStartPartyGame}
+                  style={{
+                    backgroundColor: '#7fed4c',
+                    borderColor: '#56a130',
+                    color: '#1e4612',
+                    borderBottomWidth: '4px',
+                    borderBottomStyle: 'solid',
+                  }}
+                  className="w-full py-2.5 rounded-xl font-bold text-base tracking-wider shadow-xl active:translate-y-0.5 active:border-b-0 cursor-pointer hover:brightness-105 transition-all text-center"
+                >
+                  START PARTY MATCH
+                </button>
+              </div>
+            )}
+
+            {/* Tab 2: Join Party */}
+            {partyTab === 'join' && (
+              <div className="flex flex-col gap-3 py-2">
+                <p className="text-white/70 text-xs">
+                  Enter the 4-letter Party Code provided by your friend:
+                </p>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="text"
+                    maxLength={8}
+                    value={joinInput}
+                    onChange={(e) => setJoinInput(e.target.value.toUpperCase())}
+                    placeholder="ENTER CODE (e.g. 7K9Q)"
+                    className="flex-1 py-2.5 px-3 bg-black/40 text-white font-mono text-base font-bold rounded-xl border border-white/20 uppercase tracking-widest focus:outline-none focus:border-[#33cdcf]"
+                  />
+                  <button
+                    type="button"
+                    onClick={handleJoinParty}
+                    style={{
+                      backgroundColor: '#33cdcf',
+                      borderColor: '#218c8f',
+                      color: '#063a3b',
+                      borderBottomWidth: '4px',
+                      borderBottomStyle: 'solid',
+                    }}
+                    className="px-5 py-2.5 rounded-xl font-bold text-sm tracking-wider shadow-lg active:translate-y-0.5 active:border-b-0 cursor-pointer hover:brightness-105 transition-all"
+                  >
+                    JOIN
+                  </button>
+                </div>
+                {isPartyJoined && partyCode && (
+                  <div className="p-3 bg-emerald-500/15 border border-emerald-500/30 rounded-xl text-emerald-300 text-xs flex items-center justify-between">
+                    <span>Connected to Party <strong>{partyCode}</strong>!</span>
+                    <button
+                      type="button"
+                      onClick={handleStartPartyGame}
+                      className="px-3 py-1 bg-emerald-500 text-black font-bold rounded-lg cursor-pointer"
+                    >
+                      ENTER GAME
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Main Settings Modal */}
       {isOpen && (
         <div className="pointer-events-auto fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/75 backdrop-blur-xs animate-in fade-in duration-150">
           <div
@@ -326,7 +746,69 @@ export default function App() {
               </div>
             </div>
 
-            {/* 3. Camera Zoom & Starting Base Size */}
+            {/* 3. Arena Size & Infinite Looping Arena */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+              {/* Arena Size */}
+              <div className="bg-black/30 p-2.5 rounded-xl border border-white/10 flex flex-col gap-1.5">
+                <span className="font-bold text-white text-xs sm:text-sm">🗺️ Arena Size</span>
+                <div className="grid grid-cols-3 gap-1">
+                  {[
+                    { id: 'small' as const, label: 'Small' },
+                    { id: 'normal' as const, label: 'Normal' },
+                    { id: 'massive' as const, label: 'Massive' },
+                  ].map((sz) => (
+                    <button
+                      key={sz.id}
+                      type="button"
+                      onClick={() => updateSetting('arenaSize', sz.id)}
+                      style={{
+                        backgroundColor: settings.arenaSize === sz.id ? '#33cdcf' : 'rgba(0,0,0,0.4)',
+                        borderColor: settings.arenaSize === sz.id ? '#218c8f' : '#111',
+                        color: settings.arenaSize === sz.id ? '#063a3b' : '#aaa',
+                        borderBottomWidth: '3px',
+                        borderBottomStyle: 'solid',
+                      }}
+                      className="py-1 text-[11px] font-bold rounded-lg cursor-pointer active:border-b-0 active:translate-y-0.5 text-center"
+                    >
+                      {sz.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Infinite Arena Looping */}
+              <div className="bg-black/30 p-2.5 rounded-xl border border-white/10 flex flex-col justify-between gap-1.5">
+                <div>
+                  <div className="flex items-center justify-between font-bold text-white text-xs">
+                    <span>🌀 Infinite Arena</span>
+                    {settings.infiniteArena && (
+                      <span className="text-[10px] bg-emerald-500/20 text-emerald-400 px-1 py-0.2 rounded border border-emerald-500/30">
+                        LOOP ON
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-white/60 text-[11px] mt-0.5">
+                    Map scrolls infinitely, coordinates loop around, no death borders!
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => updateSetting('infiniteArena', !settings.infiniteArena)}
+                  style={{
+                    backgroundColor: settings.infiniteArena ? '#7fed4c' : 'rgba(0,0,0,0.5)',
+                    borderColor: settings.infiniteArena ? '#56a130' : '#111',
+                    color: settings.infiniteArena ? '#1e4612' : '#aaa',
+                    borderBottomWidth: '3px',
+                    borderBottomStyle: 'solid',
+                  }}
+                  className="w-full py-1 font-bold text-xs rounded-lg cursor-pointer active:border-b-0 active:translate-y-0.5"
+                >
+                  {settings.infiniteArena ? 'ENABLED (LOOP)' : 'OFF'}
+                </button>
+              </div>
+            </div>
+
+            {/* 4. Camera Zoom & Starting Base Size */}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
               {/* Camera Zoom */}
               <div className="bg-black/30 p-2.5 rounded-xl border border-white/10 flex flex-col gap-1.5">
@@ -358,7 +840,7 @@ export default function App() {
 
               {/* Starting Base Size */}
               <div className="bg-black/30 p-2.5 rounded-xl border border-white/10 flex flex-col gap-1.5">
-                <span className="font-bold text-white text-xs sm:text-sm">🏰 Starting Territory Size</span>
+                <span className="font-bold text-white text-xs sm:text-sm">🏰 Starting Base Size</span>
                 <div className="grid grid-cols-2 gap-1.5">
                   {[
                     { id: 'standard' as const, label: 'Standard (30px)' },
@@ -384,7 +866,7 @@ export default function App() {
               </div>
             </div>
 
-            {/* 4. Trail Width & Arena Theme */}
+            {/* 5. Trail Width & Arena Theme */}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
               {/* Trail Width */}
               <div className="bg-black/30 p-2.5 rounded-xl border border-white/10 flex flex-col gap-1.5">
@@ -447,7 +929,7 @@ export default function App() {
               </div>
             </div>
 
-            {/* 5. Bot Settings */}
+            {/* 6. Bot Settings */}
             <div className="bg-black/30 p-2.5 rounded-xl border border-white/10 flex flex-col gap-2">
               <div className="flex items-center justify-between">
                 <span className="font-bold text-white text-xs sm:text-sm">🤖 Bot Settings</span>
@@ -513,7 +995,7 @@ export default function App() {
               </div>
             </div>
 
-            {/* 6. "No Skin" Custom Color */}
+            {/* 7. "No Skin" Custom Color */}
             <div className="bg-black/30 p-2.5 rounded-xl border border-white/10 flex flex-col gap-2">
               <div className="flex items-center justify-between">
                 <div>
@@ -610,29 +1092,49 @@ export default function App() {
               </div>
             </div>
 
-            {/* Footer Buttons */}
-            <div className="flex items-center justify-end gap-2 pt-2 border-t border-white/15">
+            {/* Footer Buttons: Restart Game & Save/Play */}
+            <div className="flex items-center justify-between gap-2 pt-2 border-t border-white/15">
+              {/* Restart Game Button */}
               <button
                 type="button"
-                onClick={() => setIsOpen(false)}
-                className="px-4 py-1.5 bg-black/40 hover:bg-black/60 text-white/80 hover:text-white font-bold text-xs rounded-xl cursor-pointer"
-              >
-                CLOSE
-              </button>
-              <button
-                type="button"
-                onClick={handleSaveAndPlay}
+                onClick={handleRestartGame}
                 style={{
-                  backgroundColor: '#7fed4c',
-                  borderColor: '#56a130',
-                  color: '#1e4612',
+                  backgroundColor: '#ff972f',
+                  borderColor: '#ae4e0d',
+                  color: '#422100',
                   borderBottomWidth: '4px',
                   borderBottomStyle: 'solid',
                 }}
-                className="px-6 py-2 rounded-xl font-bold text-sm tracking-wider shadow-lg active:translate-y-0.5 active:border-b-0 cursor-pointer hover:brightness-105 transition-all"
+                className="px-4 py-2 rounded-xl font-bold text-xs tracking-wider shadow-lg active:translate-y-0.5 active:border-b-0 cursor-pointer hover:brightness-105 transition-all flex items-center gap-1.5"
+                title="Restart Game from Scratch"
               >
-                SAVE & PLAY
+                <span>🔄</span>
+                <span>RESTART GAME</span>
               </button>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setIsOpen(false)}
+                  className="px-3.5 py-2 bg-black/40 hover:bg-black/60 text-white/80 hover:text-white font-bold text-xs rounded-xl cursor-pointer"
+                >
+                  CLOSE
+                </button>
+                <button
+                  type="button"
+                  onClick={handleSaveAndPlay}
+                  style={{
+                    backgroundColor: '#7fed4c',
+                    borderColor: '#56a130',
+                    color: '#1e4612',
+                    borderBottomWidth: '4px',
+                    borderBottomStyle: 'solid',
+                  }}
+                  className="px-5 py-2 rounded-xl font-bold text-sm tracking-wider shadow-lg active:translate-y-0.5 active:border-b-0 cursor-pointer hover:brightness-105 transition-all"
+                >
+                  SAVE & PLAY
+                </button>
+              </div>
             </div>
           </div>
         </div>

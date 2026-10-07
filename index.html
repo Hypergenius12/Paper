@@ -31,6 +31,17 @@
           window.paperio2api.startGame();
         }
       };
+      window.RestartGame = function() {
+        try {
+          window.dispatchEvent(new CustomEvent('paperio_game_start'));
+        } catch (e) {}
+        if (window.paperio2api && typeof window.paperio2api.start === 'function') {
+          var nick = (document.getElementById('nick') && document.getElementById('nick').value) || 'Player';
+          window.paperio2api.start(nick, '', 0);
+        } else if (typeof window.StartGame === 'function') {
+          window.StartGame();
+        }
+      };
       window.ga = function() {};
       window.gtag = function() {};
       window.checktimeForAds = function() { return false; };
