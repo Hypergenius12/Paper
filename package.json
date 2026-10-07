@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",
-    "build": "vite build",
+    "build": "npx esbuild src/main.tsx --bundle --minify --format=iife --outfile=public/settings.js --loader:.css=text && vite build && cp public/settings.js settings.js && cp public/style3.css style3.css && cp public/app2.js app2.js",
     "start": "node server.ts",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
