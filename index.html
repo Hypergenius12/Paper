@@ -27,7 +27,10 @@
         try {
           window.dispatchEvent(new CustomEvent('paperio_game_start'));
         } catch (e) {}
-        if (window.paperio2api && typeof window.paperio2api.startGame === 'function') {
+        var nick = (document.getElementById('nick') && document.getElementById('nick').value && document.getElementById('nick').value.trim()) || 'Player';
+        if (window.paperio2api && typeof window.paperio2api.start === 'function') {
+          window.paperio2api.start(nick, '', 0);
+        } else if (window.paperio2api && typeof window.paperio2api.startGame === 'function') {
           window.paperio2api.startGame();
         }
       };
@@ -35,8 +38,8 @@
         try {
           window.dispatchEvent(new CustomEvent('paperio_game_start'));
         } catch (e) {}
+        var nick = (document.getElementById('nick') && document.getElementById('nick').value && document.getElementById('nick').value.trim()) || 'Player';
         if (window.paperio2api && typeof window.paperio2api.start === 'function') {
-          var nick = (document.getElementById('nick') && document.getElementById('nick').value) || 'Player';
           window.paperio2api.start(nick, '', 0);
         } else if (typeof window.StartGame === 'function') {
           window.StartGame();
@@ -99,12 +102,13 @@
           var palette = ['#00e5ff', '#ff1744', '#00e676', '#ff9100', '#d500f9', '#ffea00', '#76ff03', '#f50057', '#2979ff'];
           hex = palette[Math.floor(Math.random() * palette.length)];
         }
+        var dark = darken(hex, 0.25);
         return {
           main: hex,
-          back: darken(hex, 0.4),
-          nick: darken(hex, 0.4),
-          plate: hex,
-          particles: [hex, darken(hex, 0.2)]
+          back: dark,
+          nick: '#FFFFFF',
+          plate: '#FFFFFF',
+          particles: [hex, dark, darken(hex, 0.4)]
         };
       };
     </script>
