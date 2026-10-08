@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",
-    "build": "npx @tailwindcss/cli -i src/index.css -o public/settings.css --minify && npx esbuild src/main.tsx --bundle --minify --format=iife --outfile=public/settings.js --loader:.css=text && vite build && cp public/settings.js settings.js && cp public/settings.css settings.css && cp public/style3.css style3.css && cp public/app2.js app2.js",
+    "build": "npx @tailwindcss/cli -i src/index.css -o public/settings.css --minify && npx esbuild src/main.tsx --bundle --minify --format=iife --outfile=public/settings.js --loader:.css=text && vite build && cp public/settings.js settings.js && cp public/settings.css settings.css && cp public/style3.css style3.css && cp public/app2.js app2.js && cp public/settings.js dist/settings.js && cp public/settings.css dist/settings.css && cp public/style3.css dist/style3.css && cp public/app2.js dist/app2.js",
     "start": "node server.ts",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",

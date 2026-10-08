@@ -69,7 +69,11 @@ const DEFAULT_SETTINGS: GameSettingsState = {
   playerName: 'Player',
 };
 
-const CLOUD_BACKEND_WS = 'wss://ais-pre-zvr2b6kpmf3ddywcq6cpos-712604269730.us-west2.run.app/ws';
+const isStaticHost = (): boolean => {
+  if (typeof window === 'undefined') return false;
+  const host = window.location.hostname || '';
+  return host.endsWith('github.io') || window.location.protocol === 'file:' || host === '';
+};
 
 export default function App() {
   const [isOpen, setIsOpen] = useState(false);
@@ -103,6 +107,7 @@ export default function App() {
   const peerRef = useRef<Peer | null>(null);
   const p2pConnectionsRef = useRef<DataConnection[]>([]);
   const chatBottomRef = useRef<HTMLDivElement | null>(null);
+  const apiFailedRef = useRef(false);
 
   const [settings, setSettings] = useState<GameSettingsState>(() => {
     try {
@@ -141,10 +146,13 @@ export default function App() {
     }
   }, []);
 
-  // Fetch public parties periodically
+  // Fetch public parties periodically (only if backend is available, never on static GitHub Pages)
   useEffect(() => {
     if (!isPartyOpen && !isPartyJoined) return;
+    if (isStaticHost() || apiFailedRef.current) return;
+
     const fetchPublic = async () => {
+      if (apiFailedRef.current) return;
       try {
         const res = await fetch('/api/party/public');
         if (res.ok) {
@@ -152,11 +160,16 @@ export default function App() {
           if (Array.isArray(data.publicParties)) {
             setPublicParties(data.publicParties);
           }
+        } else {
+          apiFailedRef.current = true;
         }
-      } catch {}
+      } catch {
+        apiFailedRef.current = true;
+      }
     };
+
     fetchPublic();
-    const iv = setInterval(fetchPublic, 5000);
+    const iv = setInterval(fetchPublic, 8000);
     return () => clearInterval(iv);
   }, [isPartyOpen, isPartyJoined]);
 
@@ -224,7 +237,7 @@ export default function App() {
     const checkUiState = () => {
       const ui = document.getElementById('ui');
       if (!ui) return;
-      const isHidden = ui.classList.contains('hide') || ui.style.display === 'none';
+      const isHidden = ui.classList.contains('hide') || ui.classList.contains('game') || ui.style.display === 'none';
       setIsPlaying(isHidden);
       if (isHidden) {
         setIsOpen(false);
@@ -296,15 +309,6 @@ export default function App() {
     p2pConnectionsRef.current = [];
   };
 
-  // Determine WebSocket endpoint
-  const getWebSocketUrl = () => {
-    if (typeof window === 'undefined') return CLOUD_BACKEND_WS;
-    const isGitHub = window.location.hostname.endsWith('github.io');
-    if (isGitHub) return CLOUD_BACKEND_WS;
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    return `${protocol}//${window.location.host}/ws`;
-  };
-
   // Connect to Party
   const connectToParty = (code: string, passwordAttempt?: string) => {
     const cleanCode = code.toUpperCase().trim();
@@ -314,7 +318,10 @@ export default function App() {
     setPartyError('');
     setConnectionStatus('Connecting...');
 
-    const nick = (document.getElementById('nick') as HTMLInputElement)?.value || settings.playerName || 'Player';
+    const nick =
+      (document.getElementById('nick') as HTMLInputElement)?.value ||
+      settings.playerName ||
+      'Player';
     const myPlayer: PartyMember = {
       id: `p-${Math.random().toString(36).substring(2, 7)}`,
       name: nick,
@@ -322,9 +329,17 @@ export default function App() {
       isHost: partyTab === 'create',
     };
 
+    // If on static host (such as GitHub Pages), directly connect via WebRTC P2P!
+    if (isStaticHost()) {
+      initPeerJSP2P(cleanCode, myPlayer, passwordAttempt);
+      return;
+    }
+
+    // Full-stack server environment: Connect via local WebSocket
     let wsSuccess = false;
     try {
-      const targetUrl = getWebSocketUrl();
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const targetUrl = `${protocol}//${window.location.host}/ws`;
       const ws = new WebSocket(targetUrl);
       wsRef.current = ws;
 
@@ -337,7 +352,12 @@ export default function App() {
           JSON.stringify({
             type: 'join_party',
             partyCode: cleanCode,
-            password: passwordAttempt !== undefined ? passwordAttempt : (partyTab === 'create' ? partyPassword : joinPassword),
+            password:
+              passwordAttempt !== undefined
+                ? passwordAttempt
+                : partyTab === 'create'
+                  ? partyPassword
+                  : joinPassword,
             name: nick,
             color: settings.customColor,
             partySettings: {
@@ -391,7 +411,7 @@ export default function App() {
           initPeerJSP2P(cleanCode, myPlayer, passwordAttempt);
         }
       };
-    } catch (e) {
+    } catch {
       initPeerJSP2P(cleanCode, myPlayer, passwordAttempt);
     }
   };
@@ -399,10 +419,11 @@ export default function App() {
   // WebRTC PeerJS P2P (Serverless mesh for GitHub Pages)
   const initPeerJSP2P = (code: string, me: PartyMember, passwordAttempt?: string) => {
     setConnectionStatus('Connecting P2P (WebRTC)...');
-    const peerId = partyTab === 'create' ? `paper2-room-${code}` : undefined;
+    const roomId = `paperio2-room-${code.toLowerCase()}`;
+    const peerId = partyTab === 'create' ? roomId : undefined;
 
     try {
-      const peer = peerId ? new Peer(peerId, { debug: 1 }) : new Peer({ debug: 1 });
+      const peer = peerId ? new Peer(peerId, { debug: 0 }) : new Peer({ debug: 0 });
       peerRef.current = peer;
 
       peer.on('open', () => {
@@ -446,11 +467,26 @@ export default function App() {
                 broadcastP2PChat(data.message);
               }
             });
+
+            conn.on('close', () => {
+              setPartyMembers((prev) => {
+                const updated = prev.filter((m) => m.id !== conn.peer);
+                p2pConnectionsRef.current.forEach((c) => {
+                  if (c.open) {
+                    c.send({
+                      type: 'party_members_updated',
+                      members: updated,
+                      settings,
+                    });
+                  }
+                });
+                return updated;
+              });
+            });
           });
         } else {
           // Guest connecting to Host
-          const hostPeerId = `paper2-room-${code}`;
-          const conn = peer.connect(hostPeerId, { reliable: true });
+          const conn = peer.connect(roomId, { reliable: true });
           p2pConnectionsRef.current = [conn];
 
           conn.on('open', () => {
@@ -476,15 +512,26 @@ export default function App() {
               handleSaveAndPlay();
             }
           });
+
+          conn.on('close', () => {
+            setPartyError('Host closed the lobby.');
+            setConnectionStatus('Disconnected');
+          });
         }
       });
 
       peer.on('error', (err: any) => {
-        setPartyError(err.type === 'unavailable-id' ? 'Party code already in use!' : 'P2P Connection failed');
+        if (err.type === 'unavailable-id') {
+          setPartyError('Party code already in use! Click Create again for a fresh code.');
+        } else if (err.type === 'peer-unavailable') {
+          setPartyError('Party room not found or host is offline. Verify your party code!');
+        } else {
+          setPartyError('P2P connection error. Check code and try again.');
+        }
         setConnectionStatus('Failed');
       });
-    } catch (err: any) {
-      setPartyError('Could not initialize P2P');
+    } catch {
+      setPartyError('Could not initialize WebRTC P2P');
       setConnectionStatus('Failed');
     }
   };
@@ -527,7 +574,10 @@ export default function App() {
     if (e) e.preventDefault();
     if (!chatInput.trim()) return;
 
-    const nick = (document.getElementById('nick') as HTMLInputElement)?.value || settings.playerName || 'Player';
+    const nick =
+      (document.getElementById('nick') as HTMLInputElement)?.value ||
+      settings.playerName ||
+      'Player';
     const newMsg: ChatMessage = {
       id: `m-${Date.now()}-${Math.random().toString(36).substring(2, 5)}`,
       sender: nick,
@@ -848,7 +898,7 @@ export default function App() {
                     : 'text-white/70 hover:text-white'
                 }`}
               >
-                PUBLIC ({publicParties.length})
+                PUBLIC {publicParties.length > 0 ? `(${publicParties.length})` : ''}
               </button>
             </div>
 
@@ -912,7 +962,7 @@ export default function App() {
                       <p className="text-[11px] text-white/60">
                         {isPrivateLobby
                           ? 'Only players with password can join'
-                          : 'Visible in the Public Parties list for everyone'}
+                          : 'Anyone with your code can join directly'}
                       </p>
                     </div>
                     <button
@@ -1025,7 +1075,18 @@ export default function App() {
             {/* Tab: PUBLIC */}
             {partyTab === 'public' && (
               <div className="flex flex-col gap-2 max-h-60 overflow-y-auto">
-                {publicParties.length === 0 ? (
+                {isStaticHost() ? (
+                  <div className="p-4 text-center text-white/70 bg-black/20 rounded-xl border border-white/5 flex flex-col gap-2">
+                    <span className="text-xl">🌐</span>
+                    <p className="font-bold text-white text-xs sm:text-sm">
+                      Direct P2P Multiplayer Mode
+                    </p>
+                    <p className="text-[11px] text-white/60">
+                      On GitHub Pages, you connect directly to other players peer-to-peer!
+                      Click <b className="text-[#33cdcf]">CREATE</b> to generate your Party Code, then share the code or link with friends to play together.
+                    </p>
+                  </div>
+                ) : publicParties.length === 0 ? (
                   <div className="p-6 text-center text-white/50 italic bg-black/20 rounded-xl border border-white/5">
                     No active public parties right now.
                     <br />

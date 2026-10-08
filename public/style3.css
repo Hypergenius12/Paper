@@ -66,8 +66,11 @@ canvas {
     background-color: rgba(0, 0, 0, 0.8);
 }
 
-#ui.hide {
-    display: none;
+#ui.hide,
+#ui.game {
+    display: none !important;
+    background-color: transparent !important;
+    pointer-events: none !important;
 }
 
 body,
@@ -423,9 +426,10 @@ a:visited {
     position: absolute;
     top: 0;
     left: 0;
-    background: #000;
-    z-index: 9;
-    display: none;
+    background: transparent;
+    z-index: -1;
+    display: none !important;
+    pointer-events: none !important;
 }
 
 #lng {

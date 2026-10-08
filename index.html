@@ -10,37 +10,58 @@
     <meta property="og:type" content="website" />
     <meta name="twitter:card" content="summary_large_image" />
     <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=PT+Sans+Caption:700&amp;subset=cyrillic" />
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>📜</text></svg>" />
     <link rel="stylesheet" href="./style3.css" />
     <link rel="stylesheet" href="./settings.css" />
   </head>
   <body class="overflow-hidden select-none bg-[#e7fff4]">
     <div id="game"></div>
     <script type="text/javascript">
+      window.shop = {
+        show: function() {},
+        hide: function() {},
+        autoCheckUnlock: function() {},
+        hasUnlock: function() { return false; },
+        available: false
+      };
       window.ads = {
         showAds: function() {},
         hideAds: function() {}
       };
       window.ShowPreroll = function() {
-        window.StartGame();
+        var ov = document.getElementById('overlay');
+        if (ov) ov.style.display = 'none';
+        if (window.paperio2api && typeof window.paperio2api.startGame === 'function') {
+          window.paperio2api.startGame();
+        } else if (typeof window.StartGame === 'function') {
+          window.StartGame();
+        }
       };
       window.StartGame = function() {
         try {
           window.dispatchEvent(new CustomEvent('paperio_game_start'));
         } catch (e) {}
-        var nick = (document.getElementById('nick') && document.getElementById('nick').value && document.getElementById('nick').value.trim()) || 'Player';
-        if (window.paperio2api && typeof window.paperio2api.start === 'function') {
-          window.paperio2api.start(nick, '', 0);
-        } else if (window.paperio2api && typeof window.paperio2api.startGame === 'function') {
+        var ov = document.getElementById('overlay');
+        if (ov) ov.style.display = 'none';
+        var ui = document.getElementById('ui');
+        if (ui) ui.classList.add('game');
+        if (window.paperio2api && typeof window.paperio2api.startGame === 'function') {
           window.paperio2api.startGame();
+        } else if (window.paperio2api && typeof window.paperio2api.start === 'function') {
+          var nick = (document.getElementById('nick') && document.getElementById('nick').value && document.getElementById('nick').value.trim()) || (window.paperSettings && window.paperSettings.playerName) || 'Player';
+          window.paperio2api.start(nick, '', 0);
         }
       };
       window.RestartGame = function() {
         try {
           window.dispatchEvent(new CustomEvent('paperio_game_start'));
         } catch (e) {}
-        var nick = (document.getElementById('nick') && document.getElementById('nick').value && document.getElementById('nick').value.trim()) || 'Player';
-        if (window.paperio2api && typeof window.paperio2api.start === 'function') {
-          window.paperio2api.start(nick, '', 0);
+        var ov = document.getElementById('overlay');
+        if (ov) ov.style.display = 'none';
+        var ui = document.getElementById('ui');
+        if (ui) ui.classList.add('game');
+        if (window.paperio2api && typeof window.paperio2api.startGame === 'function') {
+          window.paperio2api.startGame();
         } else if (typeof window.StartGame === 'function') {
           window.StartGame();
         }
